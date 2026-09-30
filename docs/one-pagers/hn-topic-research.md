@@ -37,8 +37,10 @@
 | When HN returns a deleted story during the first sweep, the sweep skips it without preserving deletion records. | Stan sees fewer usable threads than the crawler checked and cannot tell which items were deleted. | The project records deleted item IDs and reports the gap in archive coverage. | IGNORE |
 | When a historical sweep stops before reaching the oldest HN items, the local catalog contains only part of HN history. | Stan's topic report can miss older threads without showing that the archive is incomplete. | The project durably records progress, retains previously archived posts, resumes unfinished ranges, and shows coverage as incomplete until it has processed the selected historical range. | HANDLE |
 | When a mirror omits an eligible public HN post, the catalog cannot discover that post through the mirror. | Stan receives a fully processed mirror catalog that can still omit eligible HN discussions. | The project enumerates the official HN item range to establish coverage independently of the mirror. | UNDECIDED — HANDLE / IGNORE |
-| When a saved HN thread gains comments after its first download, the local comment tree and report become stale. | Stan reads a report that omits newer arguments in that thread. | The project refreshes saved threads and updates affected analyses with a visible retrieval time. | UNDECIDED — HANDLE / IGNORE |
+| When a saved HN thread gains comments after its first download, the local comment tree and report become stale. | Stan reads a report that omits newer arguments in that thread. | The project refreshes saved threads and updates affected analyses with a visible retrieval time. | IGNORE |
 
 A failed or interrupted fetch does not establish that an item is deleted.
 
 **Deferred — source selection:** The choice of data source remains pending [comment 5915555393](https://github.com/stanislavkozlovski/hn-search/pull/1#issuecomment-5915555393).
+
+**Deferred — saved-thread refresh:** Future sweeps may revisit recent threads, potentially those younger than one year; the MVP adds no refresh schedule, recent-thread heuristic, or automatic reanalysis.
