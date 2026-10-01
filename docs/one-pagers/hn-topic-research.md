@@ -48,7 +48,7 @@ A failed or interrupted fetch does not establish that an item is deleted.
 
 **Source coverage:** The MVP trusts historical mirrors such as Hugging Face or ClickHouse, accepting upstream omissions as [decided in review](https://github.com/stanislavkozlovski/hn-search/pull/1#discussion_r4153880716). For example, finishing the selected mirror range can still leave out an eligible HN post that the mirror omitted.
 
-**Deferred — source selection:** The specific historical mirror remains to be chosen in Pass 1.
+**Source selection:** Pass 1 uses ClickHouse's `hackernews_history` mirror at [play.clickhouse.com](https://play.clickhouse.com/); completion describes the selected mirror range, with no independent HN coverage check.
 
 **Deferred — independent HN coverage:** Official HN item-range enumeration to detect mirror omissions is outside the MVP.
 
@@ -63,4 +63,93 @@ A failed or interrupted fetch does not establish that an item is deleted.
 | When HN users discuss a topic under a story whose title, URL, and original post do not reveal it, the topic filter skips that story. | Stan's report omits the relevant discussion even though the thread exists in the local catalog. | The project searches comment text beyond the title and URL candidates before final topic selection. | IGNORE |
 | When a saved HN thread gains comments after its first download, the local comment tree and report become stale. | Stan reads a report that omits newer arguments in that thread. | The project refreshes saved threads and updates affected analyses with a visible retrieval time. | IGNORE |
 
-**Deferred — saved-thread refresh:** Future sweeps may revisit recent threads, potentially those younger than one year; the MVP adds no refresh schedule, recent-thread heuristic, or automatic reanalysis.
+**Deferred — saved-comment refresh:** Future sweeps may revisit recent comment trees, potentially those younger than one year; comment refresh and automatic reanalysis remain outside metadata ingestion. The new daily metadata request has the separate open decisions below.
+
+### Reopened boundary: Daily metadata collection
+
+Stan requested daily collection after approving the historical scope. These decisions remain open; the Pass 1 draft below expands the settled historical path without approving a daily refresh policy.
+
+| Edge case | What happens if ignored | What handling it adds | User decision |
+|---|---|---|---|
+| When the mirror raises a previously skipped post from four comments to six, a collector that only advances past new IDs never revisits that post. | The catalog permanently misses a post that now qualifies in the trusted mirror. | The daily collector revisits earlier top-level metadata and inserts newly eligible posts within an agreed historical range. | UNDECIDED — HANDLE / IGNORE |
+| When the mirror changes an already archived post's metadata, the catalog still contains its earlier version. | The catalog retains the saved title, text, and reported count as a historical snapshot. | The daily collector refreshes saved metadata under an agreed retention policy. | UNDECIDED — HANDLE / IGNORE |
+
+## Pass 1: High-level design
+
+**Review status:** Historical ingestion is expanded for review; daily metadata semantics reopen Pass 0, so Pass 1 is not settled.
+
+## Proposal
+
+### In-scope goals
+
+- Import qualifying top-level metadata from the selected ClickHouse mirror into a local catalog.
+- Resume unfinished historical ranges while retaining committed records.
+- Show the source, selected range, saved-post count, and whether collection finished.
+
+### Out-of-scope non-goals
+
+Comment downloads, article bodies, keyword/AI topic selection, reports, and independent verification against HN remain deferred.
+
+### Potential scope growth
+
+| Risk | Growth mechanism — when it happens in practice | Explicit cap | Decision |
+|---|---|---|---|
+| Source adapters multiply. | Each extra mirror adds field mappings, coverage rules, and interruption behavior when the collector switches providers. | One adapter for ClickHouse `hackernews_history`; no automatic fallback or upstream reconciliation. | CONSTRAIN |
+| Restarted imports multiply saved records. | Replaying fetched metadata after an interruption can create duplicate posts and repeat finished work. | One catalog record per HN ID, with durable progress for the selected historical range. | CONSTRAIN |
+| Stored content expands beyond metadata. | Following each post's comment tree or external link introduces more downloads and stored bodies. | Only the approved post metadata and collection progress; zero comment bodies, article bodies, or AI outputs. | EXCLUDE |
+
+### Public behavior changes (before / after)
+
+- **Before:** The [repository at this design head](https://github.com/stanislavkozlovski/hn-search/tree/8f6c803ccb5ca0571e50f46c446120b48c74614e) contains only this proposal; Stan has no collection command or archive.
+- **After:** Stan starts a historical collection, sees its selected mirror range and saved-post count, and reruns it after interruption to finish the remaining range. Exact command names belong to Pass 2.
+
+### Historical source and collection
+
+Use the public ClickHouse `hackernews_history` table. Its server-side selection can return only top-level post metadata meeting `descendants >= 5`. Its versioned rows require selecting the latest available version per HN ID before applying eligibility; the sizing probe used `FINAL`. The provider documents the [self-updating mirror](https://presentations.clickhouse.com/2026-embeddings/), and the [research note](../research/hn-metadata-sizing.md) records the checked schema and live query.
+
+Choose the historical ID range at the start and retain that bound when resuming. Read it in bounded portions, persist qualifying records and progress together, and keep completed portions across failures. For example, if fetching the next portion fails, previously committed posts remain readable and the range stays incomplete; restarting resumes unfinished work without duplicate catalog records.
+
+A post with four reported comments gets no record; five qualifies. Store HN ID, title, external URL, HN link, original post text when present, creation date, and reported total comment count. Read no comment bodies to count them and follow no external article links. Metadata reflects when each portion was read; finishing the range does not establish exhaustive upstream coverage.
+
+### Database and expected size
+
+Choose **SQLite** for the metadata catalog and collection progress. Stan's local collector can commit both together without operating a database server, and the measured data fits comfortably in a local file. The workload assumes one local writer; SQLite permits one writer at a time, which is sufficient for this scope. [SQLite guidance](https://www.sqlite.org/whentouse.html).
+
+On **2026-10-01**, the mirror query found **661,233** nondeleted top-level posts with at least five reported comments. Their titles, URLs, HN links, and original text totaled **166 MiB**, excluding numeric fields and database overhead. These are mirror observations, not a count of every qualifying HN post. [Query, filters, and results](../research/hn-metadata-sizing.md).
+
+For planning, assume **0.5–1 KiB per stored post** including row and basic-index overhead:
+
+| Example | Estimated main database size |
+|---|---|
+| 100,000 qualifying posts | 49–98 MiB |
+| The observed 661,233 posts | 323–646 MiB |
+| 1,000,000 qualifying posts | 488–977 MiB |
+
+These are estimates, not measured SQLite file sizes or hard limits; journals, backups, temporary space, and future search indexes are additional.
+
+### Daily metadata collection: Decision pending
+
+A daily run must distinguish discovering newly eligible posts from refreshing saved metadata. For example, Tuesday's four-comment post can qualify on Wednesday without acquiring a new HN ID. The open Pass 0 decisions determine which earlier metadata the run revisits and whether saved records change.
+
+Daily scheduling also inherits mirror delay; it cannot promise real-time HN freshness. Comment-tree refresh and report regeneration remain deferred. The draft adds no daily cursor, lookback window, or reconciliation policy before those decisions.
+
+## Rejected design alternatives
+
+| Alternative | Why rejected |
+|---|---|
+| The collector enumerates the entire official HN item-ID range to verify mirror coverage. | The collector would add per-item requests across the shared post/comment ID space for the upstream guarantee Stan explicitly excluded. |
+| The collector downloads the entire HN archive before filtering locally. | The collector would transfer comment-bearing data that server-side metadata selection can exclude. |
+| The catalog runs PostgreSQL for this first delivery. | PostgreSQL would add a database service and its configuration before this local, single-writer catalog needs them. |
+
+-----------------------------------
+
+# Legend (do not delete)
+
+Scope growth labels mean:
+
+- **INCLUDE** accepts the resulting scope;
+- **CONSTRAIN** limits the behavior that causes it;
+- **EXCLUDE** leaves the broader work outside this proposal.
+
+Each label is valid only when its row also names the repeatable growth
+mechanism and a finite, observable cap.
