@@ -6,7 +6,7 @@
 
 - **User:** Stan.
 - **Their behavior:** Stan asks “What does HN think about X?”, searches a local HN archive, and reads a report linked to the discussions.
-- **Edge-case tolerance:** Missing relevant public top-level posts with at least five reported total comments is the main failure; finding them matters more than excluding every irrelevant candidate.
+- **Edge-case tolerance:** Missing relevant eligible posts present in the chosen historical mirror is the main failure; finding them matters more than excluding every irrelevant candidate.
 
 ### What is the prevailing user problem or opportunity?
 
@@ -14,14 +14,14 @@
 
 ### What is the proposed solution, and why is it right for the user?
 
-- **Solution:** First deliver a resumable metadata catalog of public top-level HN posts with at least five reported total comments, storing HN ID, title, external URL, HN link, original post text when present, creation date, and reported total comment count.
+- **Solution:** First deliver a resumable metadata catalog from a trusted historical mirror, keeping public top-level HN posts with at least five reported total comments and storing HN ID, title, external URL, HN link, original post text when present, creation date, and reported total comment count.
 - **Why it fits the user:** One local thread catalog lets Stan start future topic searches without repeating the full HN discovery pass.
 
 Metadata ingestion includes no comment parser or AI integration.
 
 ### How would you describe the end-to-end user experience?
 
-- **End-to-end user experience:** Stan starts catalog collection, sees coverage of the selected historical range, and resumes an interrupted sweep without losing already archived posts.
+- **End-to-end user experience:** Stan starts catalog collection, sees progress through the selected historical range in the chosen mirror, and resumes an interrupted sweep without losing already archived posts.
 
 ### What existing data, behavior, or integrations must keep working?
 
@@ -37,8 +37,8 @@ Metadata ingestion includes no comment parser or AI integration.
 | When an HN story links to an external article but has no original post text, the catalog stores the article URL without its body. | The catalog retains the external URL but does not download or index the article body, so Stan cannot identify that post using terms found only in the article body. | The project downloads and indexes linked article content with its source URL. | IGNORE |
 | When HN returns a deleted story during the first sweep, the sweep skips it without preserving deletion records. | Stan sees fewer usable threads than the crawler checked and cannot tell which items were deleted. | The project records deleted item IDs and reports the gap in archive coverage. | IGNORE |
 | When the source reports fewer than five total comments on a public top-level HN post, the catalog excludes the whole post record. | The catalog stores low-comment posts and uses disk space outside the intended scope. | The catalog checks the source's reported total comment count on each top-level post before persisting it, excludes the whole post record below five, and fetches no comment bodies to determine eligibility. | HANDLE |
-| When a historical sweep stops before reaching the oldest HN items, the local catalog contains only part of HN history. | Stan sees a partial catalog without knowing that older eligible posts remain unprocessed. | The project durably records progress, retains previously archived posts, resumes unfinished ranges, and shows coverage as incomplete until it has processed the selected historical range. | HANDLE |
-| When a mirror omits an eligible public HN post, the catalog cannot discover that post through the mirror. | Stan receives a fully processed mirror catalog that can still omit eligible HN discussions. | The project enumerates the official HN item range to establish coverage independently of the mirror. | UNDECIDED — HANDLE / IGNORE |
+| When a historical sweep stops before finishing the selected range in the chosen mirror, the local catalog contains only part of that range's eligible posts. | Stan sees a partial catalog without knowing that eligible posts in the selected mirror range remain unprocessed. | The project durably records progress, retains previously archived posts, resumes unfinished ranges, and shows coverage as incomplete until it has processed the selected historical range in that mirror. | HANDLE |
+| When a mirror omits an eligible public HN post, the catalog cannot discover that post through the mirror. | Stan receives a fully processed mirror catalog that can still omit eligible HN discussions. | The project enumerates the official HN item range to establish coverage independently of the mirror. | IGNORE |
 
 HN exposes the reported total as `descendants`; `kids` lists direct children, so its length is not the total comment count. [HN API item fields](https://github.com/HackerNews/API/blob/8a0528f538bca407c2ceeeefc9bee48bdb99c1c8/README.md#items).
 
@@ -46,7 +46,11 @@ For example, a public top-level post with `descendants: 5` and two `kids` qualif
 
 A failed or interrupted fetch does not establish that an item is deleted.
 
-**Deferred — source selection:** The choice of data source remains pending [comment 5915555393](https://github.com/stanislavkozlovski/hn-search/pull/1#issuecomment-5915555393).
+**Source coverage:** The MVP trusts historical mirrors such as Hugging Face or ClickHouse, accepting upstream omissions as [decided in review](https://github.com/stanislavkozlovski/hn-search/pull/1#discussion_r4153880716). For example, finishing the selected mirror range can still leave out an eligible HN post that the mirror omitted.
+
+**Deferred — source selection:** The specific historical mirror remains to be chosen in Pass 1.
+
+**Deferred — independent HN coverage:** Official HN item-range enumeration to detect mirror omissions is outside the MVP.
 
 **Deferred — later stages:** Keyword/AI topic selection, on-demand comment archiving, and `stan_ai_client` reports each require a separate one-pager.
 
