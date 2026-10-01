@@ -54,6 +54,8 @@ A failed or interrupted fetch does not establish that an item is deleted.
 
 **Deferred — later stages:** Keyword/AI topic selection, on-demand comment archiving, and `stan_ai_client` reports each require a separate one-pager.
 
+**Deferred — live parsing:** Stan [prefers future on-demand parsing](https://github.com/stanislavkozlovski/hn-search/pull/1#discussion_r4158832692); its behavior is reserved for the separate later-stage one-pager.
+
 **Deferred — linked-report experience:** Stan asks “What does HN think about buying versus renting?”, the tool searches its thread catalog and downloads matching comment trees, then gives him a deep report of arguments, counterarguments, and representative linked comments.
 
 **Deferred — later-stage edge cases:** The existing `IGNORE` decisions below apply to those later stages.
@@ -63,20 +65,20 @@ A failed or interrupted fetch does not establish that an item is deleted.
 | When HN users discuss a topic under a story whose title, URL, and original post do not reveal it, the topic filter skips that story. | Stan's report omits the relevant discussion even though the thread exists in the local catalog. | The project searches comment text beyond the title and URL candidates before final topic selection. | IGNORE |
 | When a saved HN thread gains comments after its first download, the local comment tree and report become stale. | Stan reads a report that omits newer arguments in that thread. | The project refreshes saved threads and updates affected analyses with a visible retrieval time. | IGNORE |
 
-**Deferred — saved-comment refresh:** Future sweeps may revisit recent comment trees, potentially those younger than one year; comment refresh and automatic reanalysis remain outside metadata ingestion. The new daily metadata request has the separate open decisions below.
+**Deferred — saved-comment refresh:** Future sweeps may revisit recent comment trees, potentially those younger than one year; comment refresh and automatic reanalysis remain outside metadata ingestion. The daily metadata eligibility policy remains open below.
 
 ### Reopened boundary: Daily metadata collection
 
-Stan requested daily collection after approving the historical scope. These decisions remain open; the Pass 1 draft below expands the settled historical path without approving a daily refresh policy.
+Stan requested daily collection after approving the historical scope. Daily collection inserts newly eligible, previously absent IDs and preserves existing catalog rows. The policy for revisiting previously skipped posts that later qualify remains open.
 
 | Edge case | What happens if ignored | What handling it adds | User decision |
 |---|---|---|---|
 | When the mirror raises a previously skipped post from four comments to six, a collector that only advances past new IDs never revisits that post. | The catalog permanently misses a post that now qualifies in the trusted mirror. | The daily collector revisits earlier top-level metadata and inserts newly eligible posts within an agreed historical range. | UNDECIDED — HANDLE / IGNORE |
-| When the mirror changes an already archived post's metadata, the catalog still contains its earlier version. | The catalog retains the saved title, text, and reported count as a historical snapshot. | The daily collector refreshes saved metadata under an agreed retention policy. | UNDECIDED — HANDLE / IGNORE |
+| When the mirror changes an already archived post's metadata, the catalog still contains its earlier version. | The catalog retains the saved title, text, and reported count as a historical snapshot. | The daily collector refreshes saved metadata under an agreed retention policy. | IGNORE |
 
 ## Pass 1: High-level design
 
-**Review status:** Historical ingestion is expanded for review; daily metadata semantics reopen Pass 0, so Pass 1 is not settled.
+**Review status:** Historical ingestion is expanded for review; preserving existing catalog rows during daily collection is settled, but the daily eligibility policy remains open in Pass 0, so Pass 1 is not settled.
 
 ## Proposal
 
@@ -88,7 +90,7 @@ Stan requested daily collection after approving the historical scope. These deci
 
 ### Out-of-scope non-goals
 
-Comment downloads, article bodies, keyword/AI topic selection, reports, and independent verification against HN remain deferred.
+Refreshing existing catalog rows during daily collection is excluded. Comment downloads, live parsing, article bodies, keyword/AI topic selection, reports, and independent verification against HN remain deferred.
 
 ### Potential scope growth
 
@@ -127,11 +129,13 @@ For planning, assume **0.5–1 KiB per stored post** including row and basic-ind
 
 These are estimates, not measured SQLite file sizes or hard limits; journals, backups, temporary space, and future search indexes are additional.
 
-### Daily metadata collection: Decision pending
+### Daily metadata collection: Eligibility policy pending
 
-A daily run must distinguish discovering newly eligible posts from refreshing saved metadata. For example, Tuesday's four-comment post can qualify on Wednesday without acquiring a new HN ID. The open Pass 0 decisions determine which earlier metadata the run revisits and whether saved records change.
+Daily collection inserts newly eligible posts only when their HN IDs are absent from the catalog and preserves existing rows. For example, a saved count of five stays five when the mirror later reports twenty; the saved title, URL, text, and other metadata also stay unchanged.
 
-Daily scheduling also inherits mirror delay; it cannot promise real-time HN freshness. Comment-tree refresh and report regeneration remain deferred. The draft adds no daily cursor, lookback window, or reconciliation policy before those decisions.
+Tuesday's four-comment post can qualify on Wednesday without acquiring a new HN ID. Whether and how daily runs revisit that previously skipped post remains open in Pass 0, including the lookback and catch-up policy.
+
+Daily scheduling also inherits mirror delay; it cannot promise real-time HN freshness. Live parsing, comment-tree refresh, and report regeneration remain deferred. The draft adds no daily cursor, lookback window, or catch-up policy before the eligibility decision.
 
 ## Rejected design alternatives
 
