@@ -14,7 +14,7 @@
 
 ### What is the proposed solution, and why is it right for the user?
 
-- **Solution:** First deliver a resumable metadata catalog from a trusted historical mirror, keeping public top-level HN posts with at least five reported total comments and storing HN ID, title, external URL, HN link, original post text when present, creation date, and reported total comment count.
+- **Solution:** First deliver a resumable metadata catalog from a trusted historical mirror, admitting public top-level HN posts when they have at least five reported total comments and storing HN ID, title, external URL, HN link, original post text when present, creation date, and reported total comment count.
 - **Why it fits the user:** One local thread catalog lets Stan start future topic searches without repeating the full HN discovery pass.
 
 Metadata ingestion includes no comment parser or AI integration.
@@ -35,14 +35,14 @@ Metadata ingestion includes no comment parser or AI integration.
 | Edge case | What happens if ignored | What handling it adds | User decision |
 |---|---|---|---|
 | When an HN story links to an external article but has no original post text, the catalog stores the article URL without its body. | The catalog retains the external URL but does not download or index the article body, so Stan cannot identify that post using terms found only in the article body. | The project downloads and indexes linked article content with its source URL. | IGNORE |
-| When HN returns a deleted story during the first sweep, the sweep skips it without preserving deletion records. | Stan sees fewer usable threads than the crawler checked and cannot tell which items were deleted. | The project records deleted item IDs and reports the gap in archive coverage. | IGNORE |
-| When the source reports fewer than five total comments on a public top-level HN post, the catalog excludes the whole post record. | The catalog stores low-comment posts and uses disk space outside the intended scope. | The catalog checks the source's reported total comment count on each top-level post before persisting it, excludes the whole post record below five, and fetches no comment bodies to determine eligibility. | HANDLE |
+| When the source reports a deleted story that the catalog has not archived, the collector skips it without preserving a deletion record. | Stan sees fewer usable threads than the crawler checked and cannot tell which items were deleted. | The project records deleted item IDs and reports the gap in archive coverage. | IGNORE |
+| When the source reports fewer than five total comments on a public top-level HN post absent from the catalog, the collector skips that post. | The catalog admits low-comment posts and uses disk space outside the intended scope. | The collector checks the source's reported total comment count before admitting a post, excludes new records below five, and fetches no comment bodies to determine eligibility. | HANDLE |
 | When a historical sweep stops before finishing the selected range in the chosen mirror, the local catalog contains only part of that range's eligible posts. | Stan sees a partial catalog without knowing that eligible posts in the selected mirror range remain unprocessed. | The project durably records progress, retains previously archived posts, resumes unfinished ranges, and shows coverage as incomplete until it has processed the selected historical range in that mirror. | HANDLE |
 | When a mirror omits an eligible public HN post, the catalog cannot discover that post through the mirror. | Stan receives a fully processed mirror catalog that can still omit eligible HN discussions. | The project enumerates the official HN item range to establish coverage independently of the mirror. | IGNORE |
 
 HN exposes the reported total as `descendants`; `kids` lists direct children, so its length is not the total comment count. [HN API item fields](https://github.com/HackerNews/API/blob/8a0528f538bca407c2ceeeefc9bee48bdb99c1c8/README.md#items).
 
-For example, a public top-level post with `descendants: 5` and two `kids` qualifies; one with `descendants: 4` gets no catalog record.
+For example, a public top-level post with `descendants: 5` and two `kids` qualifies; a previously unsaved post with `descendants: 4` gets no catalog record.
 
 A failed or interrupted fetch does not establish that an item is deleted.
 
@@ -69,18 +69,19 @@ A failed or interrupted fetch does not establish that an item is deleted.
 
 ### Daily metadata collection
 
-Stan chose a rolling [five-day window](https://github.com/stanislavkozlovski/hn-search/pull/1#discussion_r4159288445) based on post creation time and [the same window on every invocation](https://github.com/stanislavkozlovski/hn-search/pull/1#discussion_r4159298725), including restart after failure or downtime. Daily collection accepts gaps outside that window.
+Stan chose a rolling [five-day window](https://github.com/stanislavkozlovski/hn-search/pull/1#discussion_r4159288445) based on post creation time and [the same window on every invocation](https://github.com/stanislavkozlovski/hn-search/pull/1#discussion_r4159298725), including restart after failure or downtime. Daily collection accepts gaps outside that window. Within it, daily runs refresh eligible saved metadata and [retain the last eligible snapshot](https://github.com/stanislavkozlovski/hn-search/pull/1#discussion_r4173257027) if a saved post later falls below five comments or becomes deleted; older saved metadata may stay stale.
 
 | Edge case | What happens if ignored | What handling it adds | User decision |
 |---|---|---|---|
 | When the mirror raises a previously skipped post from zero comments to at least five within its first five days, the daily collector encounters newly eligible metadata. | A collector that only advances past new IDs misses the now-eligible post. | The daily collector scans the preceding five days by post creation time on every invocation and inserts qualifying HN IDs absent from the catalog. | HANDLE |
 | When a post leaves the five-day creation-time window before daily collection saves it, the daily collector no longer revisits it. | Stan accepts missing posts after downtime and posts that first qualify or reach the mirror outside the window. | The daily collector backfills earlier creation times or catches up missed intervals from the last successful run. | IGNORE |
-
-**Deferred — saved-metadata refresh review:** The separate [request to refresh saved metadata](https://github.com/stanislavkozlovski/hn-search/pull/1#discussion_r4159288445) revisits the earlier `IGNORE` decision for archived rows. This timing decision does not choose replacement, deletion, or retention semantics; those remain for that review.
+| When the mirror changes a saved post's metadata within its first five days and the post still qualifies, the daily collector encounters an updated eligible version. | Stan sees the earlier title, text, and reported count in the saved snapshot. | The daily collector replaces the saved metadata with the latest eligible mirror version within the five-day window. | HANDLE |
+| When the mirror lowers a saved post's reported count below five, the qualifying query omits that post. | A collector that removes saved rows absent from its results discards an archived discussion. | The catalog keeps the post's last eligible snapshot unchanged. | HANDLE |
+| When the mirror marks a saved post deleted, the qualifying query omits that post. | A collector that removes saved rows absent from its results discards an archived discussion. | The catalog keeps the post's last eligible snapshot without adding deletion records. | HANDLE |
 
 ## Pass 1: High-level design
 
-**Review status:** The daily five-day window and restart gap acceptance are settled. Pass 1 remains under review; saved-metadata refresh semantics remain a separate review concern.
+**Review status:** The daily five-day window, restart gap acceptance, saved-metadata refresh, and last-eligible-snapshot retention are settled. Pass 1 remains under review.
 
 ## Proposal
 
@@ -89,25 +90,26 @@ Stan chose a rolling [five-day window](https://github.com/stanislavkozlovski/hn-
 - Import qualifying top-level metadata from the selected ClickHouse mirror into a local catalog.
 - Resume unfinished historical ranges while retaining committed records.
 - Discover newly eligible posts created within the preceding five days on every daily invocation, including restarts, without automatic catch-up beyond that window.
+- Refresh eligible saved metadata within that same window and retain the last eligible snapshot if a post later falls below five comments or becomes deleted.
 - Show the source, selected range, saved-post count, and whether collection finished.
 
 ### Out-of-scope non-goals
 
-Automatic daily catch-up outside the five-day window is excluded. Saved-metadata refresh remains deferred to its separate review concern. Comment downloads, live parsing, article bodies, keyword/AI topic selection, reports, and independent verification against HN remain deferred.
+Daily refresh and automatic catch-up outside the five-day window are excluded. Comment downloads, live parsing, article bodies, keyword/AI topic selection, reports, and independent verification against HN remain deferred.
 
 ### Potential scope growth
 
 | Risk | Growth mechanism — when it happens in practice | Explicit cap | Decision |
 |---|---|---|---|
 | Source adapters multiply. | Each extra mirror adds field mappings, coverage rules, and interruption behavior when the collector switches providers. | One adapter for ClickHouse `hackernews_history`; no automatic fallback or upstream reconciliation. | CONSTRAIN |
-| Restarted imports multiply saved records. | Replaying fetched metadata after an interruption can create duplicate posts and repeat finished work. | One catalog record per HN ID, with durable progress for the selected historical range. | CONSTRAIN |
+| Repeated imports multiply saved records. | Replaying metadata after interruptions or during daily refresh can add duplicate records or a new stored version for each run. | One saved snapshot per HN ID, with durable progress for the selected historical range; daily refresh replaces eligible metadata without accumulating version history. | CONSTRAIN |
 | Missed daily runs accumulate backfill work. | Catching up from the last successful run adds more historical metadata to scan as failures or downtime accumulate. | Every daily invocation scans only the preceding five days by post creation time, including restarts; no widening or automatic catch-up. | CONSTRAIN |
 | Stored content expands beyond metadata. | Following each post's comment tree or external link introduces more downloads and stored bodies. | Only the approved post metadata and collection progress; zero comment bodies, article bodies, or AI outputs. | EXCLUDE |
 
 ### Public behavior changes (before / after)
 
 - **Before:** The [repository at this design head](https://github.com/stanislavkozlovski/hn-search/tree/8f6c803ccb5ca0571e50f46c446120b48c74614e) contains only this proposal; Stan has no collection command or archive.
-- **After:** Stan starts a historical collection, sees its selected mirror range and saved-post count, and reruns it after interruption to finish the remaining range. Each daily invocation scans only posts created in the preceding five days and discovers newly eligible, absent IDs; restarting after eight days offline uses the same five-day window and leaves the older gap. Exact command names belong to Pass 2.
+- **After:** Stan starts a historical collection, sees its selected mirror range and saved-post count, and reruns it after interruption to finish the remaining range. Each daily invocation scans only posts created in the preceding five days, inserts newly eligible IDs, and refreshes eligible saved metadata. A saved post that falls below five comments or becomes deleted keeps its last eligible snapshot; restarting after eight days offline uses the same five-day window and leaves the older gap. Exact command names belong to Pass 2.
 
 ### Historical source and collection
 
@@ -115,7 +117,7 @@ Use the public ClickHouse `hackernews_history` table. Its server-side selection 
 
 Choose the historical ID range at the start and retain that bound when resuming. Read it in bounded portions, persist qualifying records and progress together, and keep completed portions across failures. For example, if fetching the next portion fails, previously committed posts remain readable and the range stays incomplete; restarting resumes unfinished work without duplicate catalog records.
 
-A post with four reported comments gets no record; five qualifies. Store HN ID, title, external URL, HN link, original post text when present, creation date, and reported total comment count. Read no comment bodies to count them and follow no external article links. Metadata reflects when each portion was read; finishing the range does not establish exhaustive upstream coverage.
+A previously unsaved post with four reported comments gets no record; five qualifies. Store HN ID, title, external URL, HN link, original post text when present, creation date, and reported total comment count. Read no comment bodies to count them and follow no external article links. Initial metadata reflects when each portion was read; finishing the range does not establish exhaustive upstream coverage.
 
 ### Database and expected size
 
@@ -131,17 +133,19 @@ For planning, assume **0.5–1 KiB per stored post** including row and basic-ind
 | The observed 661,233 posts | 323–646 MiB |
 | 1,000,000 qualifying posts | 488–977 MiB |
 
-These are estimates, not measured SQLite file sizes or hard limits; journals, backups, temporary space, and future search indexes are additional.
+These are estimates, not measured SQLite file sizes or hard limits; journals, backups, temporary space, and future search indexes are additional. Retaining previously eligible posts after their counts fall below five or they become deleted means the catalog can contain more posts than a later query's currently eligible set.
 
 ### Daily metadata collection: Rolling five-day window
 
 Every daily invocation scans the preceding five days by post creation time (`time`) in ClickHouse `hackernews_history`, including restart after failure or downtime. The window is relative to that invocation, never widened or anchored to the last successful run; daily collection performs no automatic catch-up.
 
-For example, a post skipped at zero comments on Tuesday is inserted on Wednesday if the mirror then reports at least five and the post remains within the five-day window. Daily discovery inserts qualifying HN IDs absent from the catalog; saved-row refresh semantics remain in the separate review concern.
+For example, a post skipped at zero comments on Tuesday is inserted on Wednesday if the mirror then reports at least five and the post remains within the five-day window. Apply the historical query's latest-version and eligibility rules: insert absent HN IDs and replace saved metadata for still-eligible posts within the window.
+
+If a saved two-day-old post moves from five comments to nine, refresh its metadata; if it later drops below five or becomes deleted, keep its last eligible snapshot unchanged. Daily results never remove or clear saved rows whose IDs they omit. The catalog keeps one snapshot per HN ID and does not create deletion records or metadata version history.
 
 After eight days offline, restart scans only posts created in the preceding five days and leaves the older gap. The catalog accepts posts missed after they leave the window, including posts that first qualify or reach the mirror later. This daily limit does not change the historical sweep's guarantee to resume its retained ID range until it finishes.
 
-Daily scheduling still inherits mirror delay and cannot promise real-time HN freshness. Live parsing, comment-tree refresh, and report regeneration remain deferred.
+Saved metadata outside the five-day window stays unchanged, accepting Stan's assumption that older posts receive few new comments. Daily scheduling still inherits mirror delay and cannot promise real-time HN freshness. Live parsing, comment-tree refresh, and report regeneration remain deferred.
 
 ## Rejected design alternatives
 
