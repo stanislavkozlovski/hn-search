@@ -169,11 +169,11 @@ Use Python 3.12+ and only its standard library, mainly `argparse`, `urllib.reque
 
 | New file | Responsibility |
 |---|---|
-| `hn_search/__init__.py`, `hn_search/__main__.py` | Make `python3 -m hn_search` runnable; `main()` parses commands, dispatches them, and maps failures to exit codes. |
+| `hn_search/__init__.py`, `hn_search/__main__.py` | Make `python3 -m hn_search` runnable; `main()` parses the single `collect` command, dispatches it, and catches no exceptions. |
 | `hn_search/clickhouse.py` | `max_id()` reads the historical bound; `fetch_page()` sends one parameterized query and returns a validated page. |
 | `hn_search/catalog.py` | `open_catalog()` creates or reopens schema v1; `commit_page()` writes one page and its cursor in one transaction. |
 | `hn_search/collect.py` | `collect_history()` resumes the retained ID range; `collect_daily()` freezes and scans one five-day window. |
-| `tests/test_clickhouse.py`, `tests/test_catalog.py`, `tests/test_collect.py`, `tests/test_cli.py` | Cover response validation, persistence, collection semantics, and CLI behavior. |
+| `tests/test_clickhouse.py`, `tests/test_catalog.py`, `tests/test_collect.py` | Cover response validation, persistence, and collection semantics. |
 | `README.md`, `.gitignore` | Document invocation and recovery; keep local SQLite files and Python caches out of Git. |
 
 ### Maintainability and refactor call
@@ -230,7 +230,6 @@ FORMAT JSON
 | V9 — Daily window and restart | Yes | Each invocation freezes `[T - 432000, T)` in UTC, includes the lower bound, excludes `T`, and scans a fresh window even after a failed or interrupted run. | Use creation time, not update time or the last successful run. |
 | V10 — Newly eligible posts and eligible refresh | Yes | A zero-to-five post inside the window is inserted; a still-eligible saved post takes its latest title, URL, text, and count, even when nine drops to six. | Refresh the eligible snapshot, not the maximum count. |
 | V11 — Retention and refresh boundary | Yes | Saved rows that are omitted, drop below five, become deleted, or fall outside the window stay unchanged; no ineligible row is created. | Preserve the last eligible snapshot. |
-| V12 — Failure output | Yes | Failures name the failed operation. | Distinguish durable progress from attempted work. |
 | Complete HN coverage and real-time freshness | No | Mirror omissions, mirror delay, and changes behind a historical cursor can stay absent; completion describes reads of the selected mirror range. | The mirror is trusted, and each page reflects its read time. |
 | Catch-up or metadata refresh outside five days | No | Daily runs leave older gaps and older saved metadata stale, including after eight days offline. | The fixed daily window is settled. |
 | Automatic retries or provider fallback | No | A failed request stops the command; Stan reruns it, and switching mirrors requires a design amendment. | One ClickHouse adapter without fallback is the approved cap. |
@@ -244,15 +243,15 @@ FORMAT JSON
 
 ### Unit tests
 
-Run `python3 -m unittest discover -s tests` from the repository root for every offline test. `test_clickhouse.py` feeds canned bodies through an injected `urlopen` to cover V4–V6: complete, empty, truncated, malformed, and HTTP-error responses. `test_collect.py` uses a fake clock and source for V1 and V8–V11, including exact window edges and eight days offline; one saved post moving `5 → 9 → 6 → 4 → deleted` must end with its six-comment snapshot. `test_cli.py` covers V12, including exit codes.
+Run `python3 -m unittest discover -s tests` from the repository root for every offline test. `test_clickhouse.py` feeds canned bodies through an injected `urlopen` to cover V4–V6: complete, empty, truncated, malformed, and HTTP-error responses. `test_collect.py` uses a fake clock and source for V1 and V8–V11, including exact window edges and eight days offline; one saved post moving `5 → 9 → 6 → 4 → deleted` must end with its six-comment snapshot.
 
 ### Integration tests
 
-`test_catalog.py` uses temporary real SQLite files for V2, V7, V8, and V12. It reopens committed pages, replays IDs, and injects failures before commit and between row writes and the cursor update. A subprocess killed after a reported commit must leave both posts and cursor.
+`test_catalog.py` uses temporary real SQLite files for V2, V7, and V8. It reopens committed pages, replays IDs, and injects failures before commit and between row writes and the cursor update. A subprocess killed after a reported commit must leave both posts and cursor.
 
 ### End-to-end tests
 
-Through `main()`, with an injected HTTP opener and a real SQLite file, run `collect` failing on history page two, then `collect` twice, asserting resume, counts, and retention (V7–V12). The failed run must send no daily query, and the last run must send only daily queries (V1). Before acceptance, run one bounded smoke test against the live playground:
+Through `main()`, with an injected HTTP opener and a real SQLite file, run `collect` failing on history page two, then `collect` twice, asserting resume, counts, and retention (V7–V11). The failed run must send no daily query, and the last run must send only daily queries (V1). Before acceptance, run one bounded smoke test against the live playground:
 
 ```bash
 python3 -m hn_search --db /tmp/hn-smoke.sqlite3 collect  # Ctrl-C after the first progress line
@@ -272,7 +271,7 @@ On 2026-10-25, the range `1..50235582` held 664,002 eligible posts, about 67 pag
 historical source=play.clickhouse.com/hackernews_history range=1..50235582 next_id=271044 complete=false saved_posts=10000
 ```
 
-These lines report committed progress, not HN coverage. On failure, stderr names the failed operation and says whether a rerun resumes history or starts a fresh daily window.
+These lines report committed progress, not HN coverage. On failure, the last progress line still shows saved progress, and CPython's traceback on stderr names the failed call and its exception, such as `fetch_page()` and `urllib.error.HTTPError`.
 
 ### User-facing changes
 
@@ -290,7 +289,7 @@ No existing internal API changes. Among the proposed functions, `fetch_page()` r
 python3 -m hn_search --db hn.sqlite3 collect
 ```
 
-`--db` is required. `collect` takes no bound, phase, lookback, or catch-up flags: the first run fixes `1..max(id)`, later runs resume that stored bound, and a run scans the five-day window only after history reports complete. `argparse` usage errors exit 2; incompatible catalogs and collection failures exit 1 with the next action, such as rerunning later with the same database. No HTTP server or environment variable is added.
+`--db` is required. `collect` takes no bound, phase, lookback, or catch-up flags: the first run fixes `1..max(id)`, later runs resume that stored bound, and a run scans the five-day window only after history reports complete. `argparse` usage errors exit 2. Any other failure propagates uncaught once `with conn:` has rolled back any uncommitted page, and CPython exits 1 ([`Py_RunMain`](https://docs.python.org/3/c-api/interp-lifecycle.html#c.Py_RunMain)). `README.md` states once that the next step after any failure is to rerun `collect` with the same `--db`. No HTTP server or environment variable is added.
 
 ### Data model changes
 
