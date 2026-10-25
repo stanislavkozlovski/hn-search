@@ -29,6 +29,8 @@ Keep every saved story without pruning, including stories no lens matched, along
 
 Alert through Uptime Kuma when the hourly job stops running, as Stan [asked in review](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4372391526).
 
+Cap Telegram send retries, as Stan [asked in review](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4372393074).
+
 **Deferred — shared storage:** Stan [keeps the feed's storage separate from the research archive for now](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4372390552); merging them is outside the first delivery.
 
 **Deferred — new lens over saved stories:** Stan [limits a new lens to newly discovered stories for now](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4372392240); judging saved stories for a new lens is outside the first delivery.
@@ -62,4 +64,4 @@ For example, a two-hour-old story at six points and zero comments can reach a ma
 | When the hourly job stays offline for more than ten hours, its next rolling query excludes older missed stories. | Stan misses those older stories after restart. | The feed catches up missed intervals beyond the normal lookback. | IGNORE |
 | When Stan adds a lens, saved candidates already have decisions for existing lenses. | The new lens only sees newly discovered candidates. | The feed evaluates saved candidates still within the lookback for the new lens. | IGNORE |
 | When two lenses select one story for the same bot and chat, both enqueue it. | Stan receives duplicate links in that destination. | The feed deduplicates delivery across lenses for each bot and chat. | IGNORE |
-| When Telegram accepts a send but its response is lost, the feed cannot confirm delivery. | The sender may duplicate links when retrying. | The feed records uncertain sends and defines retry behavior. | UNDECIDED — HANDLE / IGNORE |
+| When Telegram accepts a send but its response is lost, the feed cannot confirm delivery. | The sender may duplicate links when retrying. | The feed records uncertain sends and defines retry behavior. | IGNORE |
