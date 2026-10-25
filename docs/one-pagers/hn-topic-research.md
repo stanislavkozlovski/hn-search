@@ -220,7 +220,7 @@ FORMAT JSON
 | Validation | Disposition | Behavior or consequence | Reason |
 |---|---|---|---|
 | V1 — Retained historical bound and run order | Yes | `collect` reruns reuse the saved bound, never widen it as the mirror grows, and a complete range stays complete; a run sends daily queries only after its history step reports complete, never while history is incomplete or after a failure. | Preserve the selected historical sweep; one command orders history before the window. |
-| V2 — Catalog initialization and reopening | Yes | `open_catalog()` initializes an empty file as v1, reopens v1, and rejects unversioned populated files or other versions without modifying them. | No legacy schema exists; saved records must survive reruns. |
+| V2 — Catalog initialization and reopening | Yes | `open_catalog()` initializes an empty file as v1 and reopens a saved catalog without touching rows. | No legacy schema exists; saved records must survive reruns. |
 | V3 — Latest-version eligibility under the `play` profile | Yes | Four reported comments fail and five qualify regardless of `kids`; a newer deleted or below-five version hides older eligible ones; requests send only settings equal to the profile's values. | Enforce the admission rule; the read-only profile rejects changed settings. |
 | V4 — Field mapping and content boundary | Yes | `commit_page()` keeps required values and empty strings, `hn_url` derives from `id`, and the collector requests no comment bodies or linked articles. | Store only approved metadata; treat source strings as values. |
 | V5 — Pagination and termination | Yes | Each request asks ClickHouse for at most 10,000 rows ordered by `id`; the cursor advances only after a validated page commits, and a short or empty page completes the selection. | Avoid skipped rows, duplicates, and false completion. |
@@ -247,7 +247,7 @@ Run `python3 -m unittest discover -s tests` from the repository root for every o
 
 ### Integration tests
 
-`test_catalog.py` uses temporary real SQLite files for V2, V7, and V8. It reopens committed pages, replays IDs, and injects failures before commit and between row writes and the cursor update. A subprocess killed after a reported commit must leave both posts and cursor.
+`test_catalog.py` uses temporary real SQLite files for V2 (initializing and reopening a catalog), V7, and V8. It reopens committed pages, replays IDs, and injects failures before commit and between row writes and the cursor update. A subprocess killed after a reported commit must leave both posts and cursor.
 
 ### End-to-end tests
 
@@ -295,7 +295,7 @@ python3 -m hn_search --db hn.sqlite3 collect
 
 #### Database changes
 
-`open_catalog()` creates schema v1 and sets `PRAGMA user_version = 1` in one transaction:
+In one transaction, `open_catalog()` runs both definitions below as `CREATE TABLE IF NOT EXISTS` and writes `PRAGMA user_version = 1` only when the file's `user_version` is 0, that is, when the schema is first created; it never overwrites any other value.
 
 ```sql
 CREATE TABLE posts (
