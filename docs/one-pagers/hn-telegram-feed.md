@@ -25,6 +25,10 @@ Record `N → M points over X minutes` from successive observations, starting at
 
 The first delivery uses hourly overlapping search; zero-point watchlists and specialized flat-hour retirement remain deferred.
 
+Keep every saved story without pruning, including stories no lens matched, along with its score observations and lens decisions, so Stan can [revisit a story later](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4372384723).
+
+**Deferred — revisiting saved stories:** Commands that search saved stories, re-run lenses over them, or resend them are outside the first delivery.
+
 ### How would you describe the end-to-end user experience?
 
 - **End-to-end user experience:** Each hour, Stan receives one message or batch per configured Telegram destination with matching titles, article/HN links, categories, points, and any observed score growth.
