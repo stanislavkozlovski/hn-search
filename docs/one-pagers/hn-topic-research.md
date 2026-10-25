@@ -308,7 +308,6 @@ CREATE TABLE posts (
   hn_url TEXT GENERATED ALWAYS AS ('https://news.ycombinator.com/item?id=' || id) VIRTUAL
 );
 CREATE TABLE collection_progress (
-  source TEXT NOT NULL,
   next_id INTEGER NOT NULL,
   complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
   through_id INTEGER
