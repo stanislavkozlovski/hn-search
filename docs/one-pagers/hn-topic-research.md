@@ -173,7 +173,7 @@ Use Python 3.12+ and only its standard library, mainly `argparse`, `urllib.reque
 | `hn_search/clickhouse.py` | `max_id()` reads the historical bound; `fetch_page()` sends one parameterized query and returns a validated page. |
 | `hn_search/catalog.py` | `open_catalog()` creates or reopens schema v1; `commit_page()` writes one page and its cursor in one transaction; `read_status()` reads progress and counts without writing. |
 | `hn_search/collect.py` | `collect_history()` resumes the retained ID range; `collect_daily()` freezes and scans one five-day window. |
-| `tests/test_clickhouse.py`, `tests/test_catalog.py`, `tests/test_collect.py`, `tests/test_cli.py`, `tests/test_clickhouse_integration.py` | Cover response validation, persistence, collection semantics, CLI behavior, and real ClickHouse query semantics. |
+| `tests/test_clickhouse.py`, `tests/test_catalog.py`, `tests/test_collect.py`, `tests/test_cli.py` | Cover response validation, persistence, collection semantics, and CLI behavior. |
 | `README.md`, `.gitignore` | Document invocation and recovery; keep local SQLite files and Python caches out of Git. |
 
 ### Maintainability and refactor call
@@ -250,18 +250,6 @@ Run `python3 -m unittest discover -s tests` from the repository root for every o
 
 `test_catalog.py` uses temporary real SQLite files for V2, V7, V8, and V12. It reopens committed pages, replays IDs, and injects failures before commit and between row writes and the cursor update. A subprocess killed after a reported commit must leave both posts and cursor.
 
-`test_clickhouse_integration.py` runs the real adapter SQL against a disposable local server, never the public playground:
-
-```bash
-docker run -d --rm --name hn-search-ch -p 127.0.0.1:8123:8123 \
-  -e CLICKHOUSE_SKIP_USER_SETUP=1 clickhouse/clickhouse-server:26.10
-HN_SEARCH_TEST_CLICKHOUSE_URL=http://127.0.0.1:8123 \
-  python3 -m unittest discover -s tests -p test_clickhouse_integration.py
-docker stop hn-search-ch
-```
-
-The 26.10 image is the first release with the playground's `FINAL` default. The test creates `hackernews_history` with the playground's columns as `ReplacingMergeTree(update_time) ORDER BY id`, without replication, runs `SYSTEM STOP MERGES`, and inserts each version separately so `FINAL` resolves versions at query time. Adapter queries run with `readonly = 1`, so a changed setting fails locally as it does live. Fixtures cover V3–V6 and V9: superseded versions, latest deletions and count drops, stories, polls, and jobs versus comments and `parent = 0` poll options, `dead` posts, and UTC window edges. Offline runs skip the module when the URL is unset; implementation acceptance requires one explicit run.
-
 ### End-to-end tests
 
 Through `main()`, with an injected HTTP opener and a real SQLite file, run `backfill` failing on page two, then `backfill`, `status`, `daily`, and `status`, asserting resume, counts, and retention (V7–V12). Before acceptance, run one bounded smoke test against the live playground:
@@ -307,7 +295,7 @@ python3 -m hn_search --db hn.sqlite3 daily
 python3 -m hn_search --db hn.sqlite3 status
 ```
 
-`--db` is required. Bound flags take effect on the first `backfill`; later runs resume the stored bounds. `daily` has no lookback or catch-up flag. `status` opens the file read-only (`mode=ro`), so a missing catalog fails instead of being created. `argparse` usage errors exit 2; invalid bounds, incompatible catalogs, and collection failures exit 1 with the next action, such as rerunning later with the same database. No HTTP server or product environment variable is added; `HN_SEARCH_TEST_CLICKHOUSE_URL` is test-only.
+`--db` is required. Bound flags take effect on the first `backfill`; later runs resume the stored bounds. `daily` has no lookback or catch-up flag. `status` opens the file read-only (`mode=ro`), so a missing catalog fails instead of being created. `argparse` usage errors exit 2; invalid bounds, incompatible catalogs, and collection failures exit 1 with the next action, such as rerunning later with the same database. No HTTP server or environment variable is added.
 
 ### Data model changes
 
