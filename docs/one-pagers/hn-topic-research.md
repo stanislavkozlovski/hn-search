@@ -171,7 +171,7 @@ Use Python 3.12+ and only its standard library, mainly `argparse`, `urllib.reque
 |---|---|
 | `hn_search/__init__.py`, `hn_search/__main__.py` | Make `python3 -m hn_search` runnable; `main()` parses commands, dispatches them, and maps failures to exit codes. |
 | `hn_search/clickhouse.py` | `max_id()` reads the historical bound; `fetch_page()` sends one parameterized query and returns a validated page. |
-| `hn_search/catalog.py` | `open_catalog()` creates or reopens schema v1; `commit_page()` writes one page and its cursor in one transaction; `read_status()` reads progress and counts without writing. |
+| `hn_search/catalog.py` | `open_catalog()` creates or reopens schema v1; `commit_page()` writes one page and its cursor in one transaction. |
 | `hn_search/collect.py` | `collect_history()` resumes the retained ID range; `collect_daily()` freezes and scans one five-day window. |
 | `tests/test_clickhouse.py`, `tests/test_catalog.py`, `tests/test_collect.py`, `tests/test_cli.py` | Cover response validation, persistence, collection semantics, and CLI behavior. |
 | `README.md`, `.gitignore` | Document invocation and recovery; keep local SQLite files and Python caches out of Git. |
@@ -182,7 +182,7 @@ No preparatory refactor is needed because no code exists yet. Share one query bu
 
 ### Collection and commit flow
 
-1. **Historical collection:** The first `backfill` fixes inclusive bounds and commits them before fetching a page. The default is `1..max(id)`, which was `1..50235582` on 2026-10-25; `max_id()` runs `SELECT max(id) FROM hackernews_history` without `FINAL`, because every version keeps its ID. Explicit bounds replace either default and must satisfy `1 <= from_id <= through_id <= max(id)`. Later runs reuse the saved bounds: repeated flags pass, different flags fail without touching progress, and a complete range exits 0 without contacting ClickHouse.
+1. **Historical collection:** The first `backfill` fixes inclusive bounds and commits them before fetching a page. The default is `1..max(id)`, which was `1..50235582` on 2026-10-25; `max_id()` runs `SELECT max(id) FROM hackernews_history` without `FINAL`, because every version keeps its ID. Explicit bounds replace either default and must satisfy `1 <= from_id <= through_id <= max(id)`. Later runs reuse the saved bounds: repeated flags pass, different flags fail without touching progress, and a complete range prints its saved progress line and exits 0 without contacting ClickHouse.
 2. **Daily collection:** `collect_daily()` reads `T = int(time.time())` once, then overwrites only the `daily` progress row with the window `[T - 432000, T)` and `next_id = 1`. Every invocation does this, including after an interrupted daily run; historical progress is untouched.
 3. **Selection:** `fetch_page()` sends the historical query below. Daily pages drop the `through_id` predicate and add `time >= toDateTime({window_start:UInt32}, 'UTC') AND time < toDateTime({window_end:UInt32}, 'UTC')`.
 
@@ -230,7 +230,7 @@ FORMAT JSON
 | V9 — Daily window and restart | Yes | Each invocation freezes `[T - 432000, T)` in UTC, includes the lower bound, excludes `T`, and restarts at `next_id = 1` with a new window. | Use creation time, not update time or the last successful run. |
 | V10 — Newly eligible posts and eligible refresh | Yes | A zero-to-five post inside the window is inserted; a still-eligible saved post takes its latest title, URL, text, and count, even when nine drops to six. | Refresh the eligible snapshot, not the maximum count. |
 | V11 — Retention and refresh boundary | Yes | Saved rows that are omitted, drop below five, become deleted, or fall outside the window stay unchanged; no ineligible row is created. | Preserve the last eligible snapshot. |
-| V12 — Status and failure output | Yes | `status` shows source, bounds or window, committed cursor, and completion per mode plus the catalog-wide saved count, without contacting ClickHouse or creating a file; failures name the failed operation. | Distinguish durable progress from attempted work. |
+| V12 — Failure output | Yes | Failures name the failed operation. | Distinguish durable progress from attempted work. |
 | Complete HN coverage and real-time freshness | No | Mirror omissions, mirror delay, and changes behind a historical cursor can stay absent; completion describes reads of the selected mirror range. | The mirror is trusted, and each page reflects its read time. |
 | Catch-up or metadata refresh outside five days | No | Daily runs leave older gaps and older saved metadata stale, including after eight days offline. | The fixed daily window is settled. |
 | Automatic retries or provider fallback | No | A failed request stops the command; Stan reruns it, and switching mirrors requires a design amendment. | One ClickHouse adapter without fallback is the approved cap. |
@@ -244,7 +244,7 @@ FORMAT JSON
 
 ### Unit tests
 
-Run `python3 -m unittest discover -s tests` from the repository root for every offline test. `test_clickhouse.py` feeds canned bodies through an injected `urlopen` to cover V4–V6: complete, empty, truncated, malformed, and HTTP-error responses. `test_collect.py` uses a fake clock and source for V1 and V8–V11, including exact window edges and eight days offline; one saved post moving `5 → 9 → 6 → 4 → deleted` must end with its six-comment snapshot. `test_cli.py` covers V1 and V12, including exit codes and a `status` that neither calls `urlopen` nor creates a missing catalog.
+Run `python3 -m unittest discover -s tests` from the repository root for every offline test. `test_clickhouse.py` feeds canned bodies through an injected `urlopen` to cover V4–V6: complete, empty, truncated, malformed, and HTTP-error responses. `test_collect.py` uses a fake clock and source for V1 and V8–V11, including exact window edges and eight days offline; one saved post moving `5 → 9 → 6 → 4 → deleted` must end with its six-comment snapshot. `test_cli.py` covers V1 and V12, including exit codes.
 
 ### Integration tests
 
@@ -252,13 +252,12 @@ Run `python3 -m unittest discover -s tests` from the repository root for every o
 
 ### End-to-end tests
 
-Through `main()`, with an injected HTTP opener and a real SQLite file, run `backfill` failing on page two, then `backfill`, `status`, `daily`, and `status`, asserting resume, counts, and retention (V7–V12). Before acceptance, run one bounded smoke test against the live playground:
+Through `main()`, with an injected HTTP opener and a real SQLite file, run `backfill` failing on page two, then `backfill` and `daily`, asserting resume, counts, and retention (V7–V12). Before acceptance, run one bounded smoke test against the live playground:
 
 ```bash
 python3 -m hn_search --db /tmp/hn-smoke.sqlite3 backfill --through-id 300000
 python3 -m hn_search --db /tmp/hn-smoke.sqlite3 backfill
 python3 -m hn_search --db /tmp/hn-smoke.sqlite3 daily
-python3 -m hn_search --db /tmp/hn-smoke.sqlite3 status
 ```
 
 On 2026-10-25, IDs 1–300,000 held 10,993 eligible posts: one full page, one short page, then `complete=true`. The rerun must leave the saved IDs unchanged, and `daily` must add the current window's eligible posts, 476 on that day. The suite needs no full import and tests no `No` or `Defer` capability.
@@ -267,12 +266,10 @@ On 2026-10-25, IDs 1–300,000 held 10,993 eligible posts: one full page, one sh
 
 ### Observability
 
-`collect_history()` and `collect_daily()` print one progress line after each commit, never before it; `status` prints the same fields per mode:
+`collect_history()` and `collect_daily()` print one progress line after each commit, never before it, with the source, the historical range or daily window, the committed cursor, completion, and the catalog-wide saved-post count:
 
 ```text
-historical source=play.clickhouse.com/hackernews_history range=1..50235582 next_id=271044 complete=false
-daily not started
-saved_posts=10000
+historical source=play.clickhouse.com/hackernews_history range=1..50235582 next_id=271044 complete=false saved_posts=10000
 ```
 
 These lines report committed progress, not HN coverage. On failure, stderr names the failed operation and says whether a rerun resumes history or starts a fresh daily window.
@@ -285,17 +282,16 @@ No existing internal API changes. Among the proposed functions, `fetch_page()` r
 
 #### Public API changes
 
-**Before:** The repository has no runnable collector or status command.
+**Before:** The repository has no runnable collector.
 
 **After:** From the repository root, with Python 3.12+:
 
 ```bash
 python3 -m hn_search --db hn.sqlite3 backfill [--from-id N] [--through-id N]
 python3 -m hn_search --db hn.sqlite3 daily
-python3 -m hn_search --db hn.sqlite3 status
 ```
 
-`--db` is required. Bound flags take effect on the first `backfill`; later runs resume the stored bounds. `daily` has no lookback or catch-up flag. `status` opens the file read-only (`mode=ro`), so a missing catalog fails instead of being created. `argparse` usage errors exit 2; invalid bounds, incompatible catalogs, and collection failures exit 1 with the next action, such as rerunning later with the same database. No HTTP server or environment variable is added.
+`--db` is required. Bound flags take effect on the first `backfill`; later runs resume the stored bounds. `daily` has no lookback or catch-up flag. `argparse` usage errors exit 2; invalid bounds, incompatible catalogs, and collection failures exit 1 with the next action, such as rerunning later with the same database. No HTTP server or environment variable is added.
 
 ### Data model changes
 
