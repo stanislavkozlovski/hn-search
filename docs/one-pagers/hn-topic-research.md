@@ -161,30 +161,30 @@ Saved metadata outside the five-day window stays unchanged, accepting Stan's ass
 
 ### Existing files likely to change
 
-None for implementation. At [the checked head](https://github.com/stanislavkozlovski/hn-search/tree/4cd7d1c91e27729b074310fec60854ab742680af), `git ls-tree` and `rg` found only this proposal and `docs/research/hn-metadata-sizing.md`: no source, schema, fixtures, tests, entrypoints, or automation. The files, functions, and commands below are **proposed additions**, not existing interfaces.
+None. At [design head `615fed7`](https://github.com/stanislavkozlovski/hn-search/tree/615fed79d06fc1740a6a4f38388da885da82ca7a), `git ls-tree -r HEAD` and `cx overview .` list only this proposal and `docs/research/hn-metadata-sizing.md`. With no source, schema, fixture, test, entrypoint, or automation in the repository, every file, function, and command below is a **proposed addition**, not an existing interface.
 
 ### New files expected
 
-Use Python 3.12+ and its standard library (`argparse`, `urllib.request`, `json`, `sqlite3`, and `unittest`); no third-party runtime dependency is needed.
+Use Python 3.12+ and only its standard library, mainly `argparse`, `urllib.request`, `json`, `sqlite3`, and `unittest`.
 
 | New file | Responsibility |
 |---|---|
-| `hn_search/__init__.py`, `hn_search/__main__.py` | Make `python3 -m hn_search` runnable; `main()` parses commands and reports failures. |
-| `hn_search/clickhouse.py` | `max_id()` obtains the historical bound; `fetch_page()` issues and validates one metadata query. |
-| `hn_search/catalog.py` | `open_catalog()` initializes or reopens SQLite; `commit_page()` commits metadata and progress together; `read_status()` reads saved progress and counts. |
-| `hn_search/collect.py` | `collect_history()` resumes saved ID bounds; `collect_daily()` captures and scans one five-day window. |
-| `tests/test_clickhouse.py`, `tests/test_catalog.py`, `tests/test_collect.py`, `tests/test_cli.py`, `tests/test_clickhouse_integration.py` | Cover response handling, persistence, collection semantics, CLI behavior, and actual ClickHouse query semantics. |
-| `README.md`, `.gitignore` | Document invocation and recovery; exclude local SQLite files and Python caches from Git. |
+| `hn_search/__init__.py`, `hn_search/__main__.py` | Make `python3 -m hn_search` runnable; `main()` parses commands, dispatches them, and maps failures to exit codes. |
+| `hn_search/clickhouse.py` | `max_id()` reads the historical bound; `fetch_page()` sends one parameterized query and returns a validated page. |
+| `hn_search/catalog.py` | `open_catalog()` creates or reopens schema v1; `commit_page()` writes one page and its cursor in one transaction; `read_status()` reads progress and counts without writing. |
+| `hn_search/collect.py` | `collect_history()` resumes the retained ID range; `collect_daily()` freezes and scans one five-day window. |
+| `tests/test_clickhouse.py`, `tests/test_catalog.py`, `tests/test_collect.py`, `tests/test_cli.py`, `tests/test_clickhouse_integration.py` | Cover response validation, persistence, collection semantics, CLI behavior, and real ClickHouse query semantics. |
+| `README.md`, `.gitignore` | Document invocation and recovery; keep local SQLite files and Python caches out of Git. |
 
 ### Maintainability and refactor call
 
-No preparatory refactor is needed. Share one query adapter and one page-commit path; keep historical insertion and daily upserts explicit. Inject the clock and HTTP transport for tests. Do not introduce an adapter registry, ORM, task queue, migration framework, or run-history archive.
+No preparatory refactor is needed because no code exists yet. Share one query builder and one page-commit path, but keep historical insert-only writes separate from daily upserts. Inject the clock and the HTTP opener (`urlopen`) for tests. Do not add an adapter registry, ORM, task queue, migration framework, or run-history table.
 
 ### Collection and commit flow
 
-1. **Historical collection:** On the first `backfill`, choose inclusive bounds, defaulting to `1..max(id)` from the mirror, and commit them before fetching pages. Explicit bounds must be positive UInt32 IDs within that observed range. Subsequent invocations reuse saved bounds; conflicting flags fail without resetting progress. A completed range stays complete.
-2. **Daily collection:** Capture UTC time `T` once, to whole seconds. Reset only daily progress and scan creation times `[T - 432000, T)`, starting again at the first ID. Every invocation does this, even after an interrupted daily run; historical progress remains untouched.
-3. **Selection:** `fetch_page()` uses the following historical query. Daily queries replace the upper-ID predicate with `time >= toDateTime({window_start:UInt32}, 'UTC') AND time < toDateTime({window_end:UInt32}, 'UTC')`.
+1. **Historical collection:** The first `backfill` fixes inclusive bounds and commits them before fetching a page. The default is `1..max(id)`, which was `1..50235582` on 2026-10-25; `max_id()` runs `SELECT max(id) FROM hackernews_history` without `FINAL`, because every version keeps its ID. Explicit bounds replace either default and must satisfy `1 <= from_id <= through_id <= max(id)`. Later runs reuse the saved bounds: repeated flags pass, different flags fail without touching progress, and a complete range exits 0 without contacting ClickHouse.
+2. **Daily collection:** `collect_daily()` reads `T = int(time.time())` once, then overwrites only the `daily` progress row with the window `[T - 432000, T)` and `next_id = 1`. Every invocation does this, including after an interrupted daily run; historical progress is untouched.
+3. **Selection:** `fetch_page()` sends the historical query below. Daily pages drop the `through_id` predicate and add `time >= toDateTime({window_start:UInt32}, 'UTC') AND time < toDateTime({window_end:UInt32}, 'UTC')`.
 
 ```sql
 SELECT id, title, url, text, toUnixTimestamp(time) AS created_at, descendants
@@ -193,111 +193,157 @@ WHERE id >= {next_id:UInt32} AND id <= {through_id:UInt32}
   AND type IN ('story', 'poll', 'job')
   AND parent = 0 AND deleted = 0 AND descendants >= 5
 ORDER BY id LIMIT 10000
-SETTINGS optimize_move_to_prewhere_if_final = 0,
-         result_overflow_mode = 'throw',
+SETTINGS result_overflow_mode = 'throw',
          timeout_overflow_mode = 'throw',
          read_overflow_mode = 'throw'
 FORMAT JSON
 ```
 
-Keep eligibility after version selection: `PREWHERE` can otherwise filter a newer ineligible version before `FINAL`. Do not add `dead = 0`; the [checked sizing query](../research/hn-metadata-sizing.md#reproducible-measurement) deliberately includes those posts. [ClickHouse PREWHERE semantics](https://clickhouse.com/docs/sql-reference/statements/select/prewhere).
+**Read-only settings.** The `play` user has `readonly = 1`, so ClickHouse accepts a `SETTINGS` entry only when it matches the current value. On 2026-10-25, server `26.11.1.707` accepted the three `throw` entries but returned HTTP 500 for `optimize_move_to_prewhere_if_final = 0`, because 26.10 changed that default to `1`. [Live profile](https://play.clickhouse.com/?user=play&query=SELECT%20name%2C%20value%20FROM%20system.settings%20WHERE%20name%20IN%20%28%27readonly%27%2C%20%27optimize_move_to_prewhere_if_final%27%2C%20%27max_execution_time%27%2C%20%27max_result_rows%27%29). Send no other settings. If the provider switches an overflow mode to `break`, the pinned `throw` fails the request instead of returning truncated rows.
 
-Send typed parameters through HTTPS GET to `https://play.clickhouse.com/?user=play`, with `wait_end_of_query=1`. Read and validate the entire JSON object before writing: reject HTTP errors, truncated or malformed bodies, an `exception` field, mismatched row counts, invalid required fields, and duplicate, unordered, or out-of-range IDs. HTTP 200 alone does not establish query success. Keep overflow settings at `throw`; if the provider rejects them, stop. [HTTP error behavior](https://clickhouse.com/docs/interfaces/http#http_response_codes_caveats).
+**Eligibility after version selection.** Write every eligibility filter in `WHERE`, never `PREWHERE`. Before 26.10, automatic `PREWHERE` was off by default for `FINAL`; since then it moves only conditions on the sorting key (`id`), so the type, parent, deletion, and count filters see each ID's latest version. [ClickHouse setting source](https://github.com/ClickHouse/ClickHouse/blob/a3c1418967fb78aced6e1bace70f0611ca15601b/src/Core/Settings.cpp#L1153-L1172). Keep the `type` filter: all 15,906 poll options in the mirror have `parent = 0`. Do not add `dead = 0`; the [sizing query](../research/hn-metadata-sizing.md#reproducible-measurement) counts those 2,690 posts.
 
-The schema and these query settings were rechecked on **2026-10-03**: a historical query returned 10,000 ordered rows, and a UTC-window query succeeded. This verifies the query shape, not a full import or throughput guarantee. [Live schema query](https://play.clickhouse.com/?user=play&query=SHOW%20CREATE%20TABLE%20hackernews_history%20FORMAT%20JSON).
+**Transport and validation.** `fetch_page()` sends an HTTPS GET to `https://play.clickhouse.com/?user=play` with `wait_end_of_query=1` and typed `param_next_id`, `param_through_id`, `param_window_start`, or `param_window_end` values, and never interpolates values into SQL. It reads and validates the whole JSON object before any write. It rejects HTTP errors, truncated or malformed bodies, an `exception` field, a `rows` value that differs from `len(data)`, invalid required fields, duplicate, unordered, or out-of-range IDs, and daily rows whose `created_at` falls outside the window. HTTP 200 alone does not prove success. [HTTP response caveats](https://clickhouse.com/docs/interfaces/http#http_response_codes_caveats).
 
-`commit_page()` inserts absent IDs during historical collection and uses `ON CONFLICT(id) DO UPDATE` during daily collection, updating metadata in place. Derive `hn_url` from `id`; preserve source strings, including HTML, Unicode, and empty URL/text. Historical replay never overwrites a saved daily snapshot. Neither path deletes posts.
+**Live check (2026-10-25).** The [table](https://play.clickhouse.com/?user=play&query=SHOW%20CREATE%20TABLE%20hackernews_history%20FORMAT%20JSON) still matches the [research note](../research/hn-metadata-sizing.md#source): `ReplicatedReplacingMergeTree` versioned by `update_time` and ordered by `id UInt32`. Its `title`, `url`, and `text` columns are non-nullable `String`, so absent values arrive as `""`. The first historical page returned 10,000 posts, IDs 121–271,043, in 0.54 s; the daily window returned 476 posts in 0.33 s. Each probe read at most 64M rows, far inside the `play` limits: per query, 60 s and 1,000,000 result rows; per client each hour, 3,000 queries, 600 s of execution, and 300 billion rows read. The 664,002 posts eligible that day fill about 67 pages. These checks verify query shape and headroom, not throughput.
 
-Commit the page and its next cursor in one SQLite transaction. A full page advances to its last ID plus one; a successful short or empty page also marks the remaining selection complete. Historical completion sets the cursor beyond the retained upper bound. A crash before commit replays that page; a crash after commit resumes after it. For example, failure while fetching page two leaves page one's posts and progress intact.
+**Writes.** `open_catalog()` connects with `sqlite3.connect(path, autocommit=False)`, new in Python 3.12, and `commit_page()` runs inside `with conn:`: it writes the page, updates that mode's cursor, and commits once. Historical pages use `INSERT ... ON CONFLICT(id) DO NOTHING`, so replay never overwrites a saved snapshot. Daily pages use `ON CONFLICT(id) DO UPDATE SET` for `title`, `url`, `text`, `created_at`, and `descendants`. Neither path deletes rows, and both store source strings unchanged, including HTML, Unicode, and empty URL/text.
 
-Fetch one page at a time with a 90-second socket timeout. A transport, quota, decoding, or SQLite failure ends the command with a nonzero exit; Stan reruns it after resolving the failure. No automatic retries or provider fallback are added.
+**Cursor.** A full page advances `next_id` to its last ID plus one. A short or empty page also sets `complete = 1`, and historical completion leaves `next_id = through_id + 1`. A crash before commit replays that page; a crash after commit resumes after it. For example, a timeout on page two leaves page one's 10,000 posts and `next_id = 271044` intact.
+
+**Failures.** `fetch_page()` requests one page at a time with `urlopen(..., timeout=90)`, above the server's 60-second limit. A transport, HTTP, quota, decoding, validation, or SQLite failure stops the command with exit code 1, and Stan reruns it once the cause clears. There are no automatic retries or provider fallback.
 
 ## Validation matrix
 
-`Yes` rows are implementation obligations; `No` rows retain approved limitations; `Defer` rows add no implementation now.
+`Yes` rows are implementation obligations; `No` rows record approved limitations; `Defer` rows add no implementation now.
 
 | Validation | Disposition | Behavior or consequence | Reason |
 |---|---|---|---|
-| V1 — Command arguments and retained historical bounds | Yes | Reject malformed, reversed, out-of-range, or conflicting bounds without resetting saved work; resuming never expands the range when the mirror grows. | Preserve the selected historical sweep. |
-| V2 — Catalog initialization and reopening | Yes | Initialize an empty database, reopen v1, and reject unversioned populated databases or other schema versions without replacing data. | No legacy schema exists; saved records must survive reruns. |
-| V3 — Latest-version eligibility | Yes | Select the latest version before checking type, parent, deletion, and `descendants >= 5`; four fails and five qualifies regardless of `kids` length. | Enforce the approved admission rule without resurrecting older eligible versions. |
-| V4 — Field mapping and content boundary | Yes | Preserve required values and empty strings, construct the HN link, and transfer no comment bodies or linked articles. | Store only approved metadata; treat source text and URLs as values. |
-| V5 — Pagination and termination | Yes | Fetch at most 10,000 rows per request in strict ID order; advance only after a validated page and commit, including zero-result completion. | Avoid skipped rows, duplicate records, and false completion. |
-| V6 — Incomplete responses and dependency failures | Yes | Reject invalid payloads, HTTP-200 exceptions, timeouts, quota errors, and overflow; leave the failed page and its progress uncommitted. | An error is neither an empty page nor a deletion signal. |
-| V7 — Interrupted or failed SQLite commits | Yes | Roll back metadata and progress together; reopening retains earlier commits and safely replays unfinished work. | Provide durable historical resume. |
-| V8 — Overlapping historical and daily records | Yes | Keep one row per HN ID; historical insertion leaves existing snapshots intact and daily upsert updates them in place. | Retain archived posts without version history or delete-and-reinsert behavior. |
-| V9 — Daily window and restart | Yes | Freeze UTC bounds per invocation, include the lower bound, exclude `T`, and restart with a newly calculated five-day window and cursor. | Use creation time, not update time or the last successful run. |
-| V10 — Newly eligible posts and eligible refresh | Yes | Insert a zero-to-five post inside the window; replace saved title, URL, text, and count when still eligible, even if its count decreases from nine to six. | Refresh the eligible snapshot, not the maximum observed count. |
-| V11 — Retention and refresh boundary | Yes | Keep saved rows unchanged when omitted, below five, deleted, or outside the daily window; create no new ineligible records. | Preserve the last eligible snapshot. |
-| V12 — Status and failure output | Yes | Show source, historical bounds or daily window, committed cursor, catalog-wide saved count, and completion separately for each mode; failures exit nonzero. | Distinguish durable progress from attempted work. |
-| Complete HN coverage and real-time freshness | No | Mirror omissions, delayed updates, and changes behind a historical cursor can remain absent; completion describes reads of the selected mirror range. | The mirror is trusted and each page reflects its read time. |
-| Catch-up or metadata refresh outside five days | No | Daily runs leave older gaps and saved metadata stale, including after eight days offline. | The fixed daily window is settled. |
-| Simultaneous collectors | No | Stan must serialize invocations; overlapping runs are unsupported and can fail on SQLite locking. | Pass 1 assumes one local writer; add no coordination protocol. |
-| Hard database, response-byte, or per-post text limits | No | Row-bounded pages still have variable byte sizes; the catalog may exceed planning estimates. | Estimates are not caps; do not truncate approved metadata. |
-| Deletion records and metadata version history | No | Newly encountered deleted posts leave no record, and retained posts have one eligible snapshot. | Preserve the explicit storage cap. |
-| Independent HN coverage checking | Defer | Revisit official item enumeration in a separate coverage proposal. | Mirror omissions remain accepted in this delivery. |
-| Comments, article bodies, search, live parsing, and reports | Defer | Keep these out of the collector; later-stage one-pagers must define their behavior and compatibility. | Preserve the approved stage boundary. |
+| V1 — Command arguments and retained historical bounds | Yes | `backfill` rejects malformed, reversed, out-of-range, or conflicting bounds without touching saved work; reruns never widen the range as the mirror grows, and a complete range stays complete. | Preserve the selected historical sweep. |
+| V2 — Catalog initialization and reopening | Yes | `open_catalog()` initializes an empty file as v1, reopens v1, and rejects unversioned populated files or other versions without modifying them. | No legacy schema exists; saved records must survive reruns. |
+| V3 — Latest-version eligibility under the `play` profile | Yes | Four reported comments fail and five qualify regardless of `kids`; a newer deleted or below-five version hides older eligible ones; requests send only settings equal to the profile's values. | Enforce the admission rule; the read-only profile rejects changed settings. |
+| V4 — Field mapping and content boundary | Yes | `commit_page()` keeps required values and empty strings, `hn_url` derives from `id`, and the collector requests no comment bodies or linked articles. | Store only approved metadata; treat source strings as values. |
+| V5 — Pagination and termination | Yes | Each request returns at most 10,000 rows in strict ID order; the cursor advances only after a validated page commits, and a short or empty page completes the selection. | Avoid skipped rows, duplicates, and false completion. |
+| V6 — Incomplete responses and dependency failures | Yes | Invalid payloads, HTTP-200 exceptions, rejected settings, timeouts, quota errors, and overflow leave that page and its cursor uncommitted and exit 1. | An error is neither an empty page nor a deletion signal. |
+| V7 — Interrupted or failed SQLite commits | Yes | A failure or kill rolls back the page and cursor together; reopening keeps earlier commits and replays unfinished work. | Provide durable historical resume. |
+| V8 — Overlapping historical and daily records | Yes | Each HN ID keeps one row; historical inserts leave existing rows untouched, and daily upserts update them in place. | Retain archived posts without version history or delete-and-reinsert. |
+| V9 — Daily window and restart | Yes | Each invocation freezes `[T - 432000, T)` in UTC, includes the lower bound, excludes `T`, rejects rows outside it, and restarts at `next_id = 1` with a new window. | Use creation time, not update time or the last successful run. |
+| V10 — Newly eligible posts and eligible refresh | Yes | A zero-to-five post inside the window is inserted; a still-eligible saved post takes its latest title, URL, text, and count, even when nine drops to six. | Refresh the eligible snapshot, not the maximum count. |
+| V11 — Retention and refresh boundary | Yes | Saved rows that are omitted, drop below five, become deleted, or fall outside the window stay unchanged; no ineligible row is created. | Preserve the last eligible snapshot. |
+| V12 — Status and failure output | Yes | `status` shows source, bounds or window, committed cursor, and completion per mode plus the catalog-wide saved count, without contacting ClickHouse or creating a file; failures name the failed operation. | Distinguish durable progress from attempted work. |
+| Complete HN coverage and real-time freshness | No | Mirror omissions, mirror delay, and changes behind a historical cursor can stay absent; completion describes reads of the selected mirror range. | The mirror is trusted, and each page reflects its read time. |
+| Catch-up or metadata refresh outside five days | No | Daily runs leave older gaps and older saved metadata stale, including after eight days offline. | The fixed daily window is settled. |
+| Automatic retries or provider fallback | No | A failed request stops the command; Stan reruns it, and switching mirrors requires a design amendment. | One ClickHouse adapter without fallback is the approved cap. |
+| Simultaneous collectors | No | Stan serializes invocations; an overlapping writer can fail with `database is locked` after SQLite's 5-second timeout. | Pass 1 assumes one local writer; add no coordination. |
+| Hard database, response-byte, or per-post text limits | No | Pages are row-bounded, so their byte size varies; the catalog may exceed planning estimates. | Estimates are not caps; approved metadata is not truncated. |
+| Deletion records and metadata version history | No | Newly encountered deleted posts leave no record; retained posts keep one eligible snapshot. | Preserve the explicit storage cap. |
+| Independent HN coverage checking | Defer | Official item enumeration waits for a separate coverage proposal. | Mirror omissions are accepted in this delivery. |
+| Comments, article bodies, search, live parsing, and reports | Defer | These stay out of the collector; later-stage one-pagers define their behavior and compatibility. | Preserve the approved stage boundary. |
 
 ## Test plan
 
 ### Unit tests
 
-Run `python3 -m unittest discover -s tests` from the repository root. `test_clickhouse.py` covers V4–V6 with complete, empty, truncated, malformed, exception-bearing, and wrongly ordered responses. `test_collect.py` uses a fake clock and source to cover V1 and V8–V11, including exact window boundaries, eight-day downtime, and a saved post progressing `5 → 9 → 6 → 4 → deleted`. `test_cli.py` covers V1 and V12, including nonzero errors and status that neither contacts ClickHouse nor creates a missing catalog.
+Run `python3 -m unittest discover -s tests` from the repository root for every offline test. `test_clickhouse.py` feeds canned bodies through an injected `urlopen` to cover V4–V6 and V9: complete, empty, truncated, malformed, exception-bearing, row-count-mismatched, unordered, and out-of-window responses. `test_collect.py` uses a fake clock and source for V1 and V8–V11, including exact window edges and eight days offline; one saved post moving `5 → 9 → 6 → 4 → deleted` must end with its six-comment snapshot. `test_cli.py` covers V1 and V12, including exit codes and a `status` that neither calls `urlopen` nor creates a missing catalog.
 
 ### Integration tests
 
-`test_catalog.py` uses temporary real SQLite databases for V2, V7, V8, and V12: reopen committed pages, replay IDs, and fail before commit and between row writes and cursor updates. A subprocess interruption after a reported commit must preserve both posts and progress.
+`test_catalog.py` uses temporary real SQLite files for V2, V7, V8, and V12. It reopens committed pages, replays IDs, and injects failures before commit and between row writes and the cursor update. A subprocess killed after a reported commit must leave both posts and cursor.
 
-`test_clickhouse_integration.py` runs the actual adapter SQL against a disposable local ClickHouse `hackernews_history` fixture matching the checked schema. Cover V3–V6 and V9 with duplicate versions, latest deletions/count reductions, stories/polls/jobs versus comments/poll options, `dead` posts, and UTC boundaries. This test must not create fixtures on the public playground. Require an explicit run before implementation acceptance: `HN_SEARCH_TEST_CLICKHOUSE_URL=http://127.0.0.1:8123 python3 -m unittest discover -s tests -p test_clickhouse_integration.py`; ordinary offline runs skip it when that test-only URL is absent.
+`test_clickhouse_integration.py` runs the real adapter SQL against a disposable local server, never the public playground:
+
+```bash
+docker run -d --rm --name hn-search-ch -p 127.0.0.1:8123:8123 \
+  -e CLICKHOUSE_SKIP_USER_SETUP=1 clickhouse/clickhouse-server:26.10
+HN_SEARCH_TEST_CLICKHOUSE_URL=http://127.0.0.1:8123 \
+  python3 -m unittest discover -s tests -p test_clickhouse_integration.py
+docker stop hn-search-ch
+```
+
+The 26.10 image is the first release with the playground's `FINAL` default. The test creates `hackernews_history` with the playground's columns as `ReplacingMergeTree(update_time) ORDER BY id`, without replication, runs `SYSTEM STOP MERGES`, and inserts each version separately so `FINAL` resolves versions at query time. Adapter queries run with `readonly = 1`, so a changed setting fails locally as it does live. Fixtures cover V3–V6 and V9: superseded versions, latest deletions and count drops, stories, polls, and jobs versus comments and `parent = 0` poll options, `dead` posts, and UTC window edges. Offline runs skip the module when the URL is unset; implementation acceptance requires one explicit run.
 
 ### End-to-end tests
 
-Exercise `backfill → interruption → backfill → status → daily → status` through `main()` with a test-injected HTTP transport and real SQLite, confirming resume, counts, and retention (V7–V12). Before implementation acceptance, also smoke-test a bounded historical range against the public mirror and rerun it to confirm stable saved IDs and completion. No full historical import is required for the test suite; no tests implement `No` or `Defer` capabilities.
+Through `main()`, with an injected HTTP opener and a real SQLite file, run `backfill` failing on page two, then `backfill`, `status`, `daily`, and `status`, asserting resume, counts, and retention (V7–V12). Before acceptance, run one bounded smoke test against the live playground:
+
+```bash
+python3 -m hn_search --db /tmp/hn-smoke.sqlite3 backfill --through-id 300000
+python3 -m hn_search --db /tmp/hn-smoke.sqlite3 backfill
+python3 -m hn_search --db /tmp/hn-smoke.sqlite3 daily
+python3 -m hn_search --db /tmp/hn-smoke.sqlite3 status
+```
+
+On 2026-10-25, IDs 1–300,000 held 10,993 eligible posts: one full page, one short page, then `complete=true`. The rerun must leave the saved IDs unchanged, and `daily` must add the current window's eligible posts, 476 on that day. The suite needs no full import and tests no `No` or `Defer` capability.
 
 ## Other considerations
 
 ### Observability
 
-Print progress only after commits. For example, `mode=historical range=1..1000000 next_id=271044 complete=false saved_posts=10000` reports a committed page, not a percentage of HN coverage. `status` reports historical and daily state separately, including `not started`; stderr identifies the failed operation and tells Stan whether rerunning resumes history or starts a fresh daily window.
+`collect_history()` and `collect_daily()` print one progress line after each commit, never before it; `status` prints the same fields per mode:
+
+```text
+historical source=play.clickhouse.com/hackernews_history range=1..50235582 next_id=271044 complete=false
+daily not started
+saved_posts=10000
+```
+
+These lines report committed progress, not HN coverage. On failure, stderr names the failed operation and says whether a rerun resumes history or starts a fresh daily window.
 
 ### User-facing changes
 
 #### Internal API changes
 
-No existing internal API changes. The proposed `fetch_page()` returns one validated page; `commit_page()` owns its single metadata-and-progress transaction. Collection functions select the mode and bounds.
+No existing internal API changes. Among the proposed functions, `fetch_page()` returns one validated page or raises, `commit_page()` owns the single page-and-cursor transaction, and `collect_history()` and `collect_daily()` choose the mode and bounds.
 
 #### Public API changes
 
-**Before:** The repository provides no runnable collector or status command.
+**Before:** The repository has no runnable collector or status command.
 
 **After:** From the repository root, with Python 3.12+:
 
 ```bash
-python3 -m hn_search --db hn.sqlite3 backfill
+python3 -m hn_search --db hn.sqlite3 backfill [--from-id N] [--through-id N]
 python3 -m hn_search --db hn.sqlite3 daily
 python3 -m hn_search --db hn.sqlite3 status
 ```
 
-`--db` is required. First backfill optionally accepts `--from-id` and `--through-id`; rerunning without those flags resumes the stored selection. `daily` has no lookback or catch-up flag. `status` reads local state without initiating collection. Invalid arguments, incompatible catalogs, and collection failures return nonzero with the next action; transient mirror failures call for rerunning later with the same database. There are no renamed entrypoints, HTTP server, or product configuration environment variables.
+`--db` is required. Bound flags take effect on the first `backfill`; later runs resume the stored bounds. `daily` has no lookback or catch-up flag. `status` opens the file read-only (`mode=ro`), so a missing catalog fails instead of being created. `argparse` usage errors exit 2; invalid bounds, incompatible catalogs, and collection failures exit 1 with the next action, such as rerunning later with the same database. No HTTP server or product environment variable is added; `HN_SEARCH_TEST_CLICKHOUSE_URL` is test-only.
 
 ### Data model changes
 
 #### Database changes
 
-Create schema v1 with `PRAGMA user_version = 1` and two tables:
+`open_catalog()` creates schema v1 and sets `PRAGMA user_version = 1` in one transaction:
 
-- `posts`: `id INTEGER PRIMARY KEY`; `title`, `url`, `hn_url`, and `text` as non-null text; `created_at` and `descendants` as non-null integers, with `descendants >= 5`. Store UTC epoch seconds and retain empty source strings. The ID primary key is the only initial index.
-- `collection_progress`: `mode TEXT PRIMARY KEY` constrained to `historical` or `daily`, plus `source`, `next_id`, and `complete`; historical rows store inclusive `from_id`/`through_id`, while daily rows store UTC `window_start`/`window_end`. Keep at most these two rows, not an attempt log. Resetting daily progress never resets historical progress or posts.
+```sql
+CREATE TABLE posts (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  url TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL,  -- UTC epoch seconds
+  descendants INTEGER NOT NULL CHECK (descendants >= 5),
+  hn_url TEXT GENERATED ALWAYS AS ('https://news.ycombinator.com/item?id=' || id) VIRTUAL
+);
+CREATE TABLE collection_progress (
+  mode TEXT PRIMARY KEY CHECK (mode IN ('historical', 'daily')),
+  source TEXT NOT NULL,
+  next_id INTEGER NOT NULL,
+  complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
+  from_id INTEGER, through_id INTEGER,      -- historical only
+  window_start INTEGER, window_end INTEGER  -- daily only
+);
+```
 
-Use explicit SQLite transactions with default journaling and synchronous settings; bind stored values as parameters. Daily updates use `DO UPDATE`, not SQLite `REPLACE`. There are no existing migrations to run. **Deferred — future schema changes:** A later feature must define migration and rollback requirements before adding comment storage or changing schema v1.
+`hn_url` keeps the approved HN-link field without storing duplicate bytes: SQLite computes it from `id` on read, saving about 28 MiB at the observed 661,233 posts. Generated columns require SQLite 3.31.0 or newer. [SQLite generated columns](https://www.sqlite.org/gencol.html). `collection_progress` holds at most these two rows, not an attempt log, and resetting `daily` never touches the `historical` row or posts. The ID primary key is the only index. Bind every stored value as a parameter, keep default journaling and synchronous settings, and never use `REPLACE`, which deletes a row before reinserting it. There are no existing migrations. **Deferred — future schema changes:** a later feature must define migration and rollback before adding comment storage or changing v1.
 
 #### File system changes
 
-Persist the catalog and progress only in the selected `--db` database and SQLite's journal files. Do not add raw-response dumps, separate checkpoint files, or new filesystem validation guarantees.
+The catalog and progress live only in the `--db` file and SQLite's journal. Add no raw-response dumps, checkpoint files, or filesystem validation guarantees.
 
 ### Deployment
 
-Run the module from the checkout; no database service or global CLI installation is required. Complete the historical sweep and invoke `daily` serially on subsequent days. Host scheduler installation is **deferred** to a separate operational change. Stopping or rolling back the collector leaves the SQLite archive in place; this delivery has no earlier application version or schema to migrate.
+Run the module from the checkout; no database service, package install, or global CLI is required. Run `backfill`, rerunning after any failure, until it reports `complete=true`. Then run `daily` immediately, so its window covers posts created after the historical bound was fixed, and once a day after that, never alongside another collector. **Deferred — daily scheduler:** installing a host scheduler for `daily` is a separate operational change. Stopping or rolling back the collector leaves the SQLite file in place; there is no earlier version or schema to migrate.
 
 -----------------------------------
 
