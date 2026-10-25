@@ -183,7 +183,7 @@ No preparatory refactor is needed because no code exists yet. Share one query bu
 ### Collection and commit flow
 
 1. **Historical collection:** The first `backfill` fixes inclusive bounds and commits them before fetching a page. The default is `1..max(id)`, which was `1..50235582` on 2026-10-25; `max_id()` runs `SELECT max(id) FROM hackernews_history` without `FINAL`, because every version keeps its ID. Explicit bounds replace either default and must satisfy `1 <= from_id <= through_id <= max(id)`. Later runs reuse the saved bounds: repeated flags pass, different flags fail without touching progress, and a complete range prints its saved progress line and exits 0 without contacting ClickHouse.
-2. **Daily collection:** `collect_daily()` reads `T = int(time.time())` once, then overwrites only the `daily` progress row with the window `[T - 432000, T)` and `next_id = 1`. Every invocation does this, including after an interrupted daily run; historical progress is untouched.
+2. **Daily collection:** `collect_daily()` reads `T = int(time.time())` once and keeps the window `[T - 432000, T)` and its page cursor, starting at `next_id = 1`, in memory. Every invocation, including after a failed or interrupted daily run, scans a fresh window from the start. Daily pages commit posts only, one page per transaction; historical progress is untouched.
 3. **Selection:** `fetch_page()` sends the historical query below. Daily pages drop the `through_id` predicate and add `time >= toDateTime({window_start:UInt32}, 'UTC') AND time < toDateTime({window_end:UInt32}, 'UTC')`.
 
 ```sql
@@ -207,7 +207,7 @@ FORMAT JSON
 
 **Live check (2026-10-25).** The [table](https://play.clickhouse.com/?user=play&query=SHOW%20CREATE%20TABLE%20hackernews_history%20FORMAT%20JSON) still matches the [research note](../research/hn-metadata-sizing.md#source): `ReplicatedReplacingMergeTree` versioned by `update_time` and ordered by `id UInt32`. Its `title`, `url`, and `text` columns are non-nullable `String`, so absent values arrive as `""`. The first historical page returned 10,000 posts, IDs 121–271,043, in 0.54 s; the daily window returned 476 posts in 0.33 s. Each probe read at most 64M rows, far inside the `play` limits: per query, 60 s and 1,000,000 result rows; per client each hour, 3,000 queries, 600 s of execution, and 300 billion rows read. The 664,002 posts eligible that day fill about 67 pages. These checks verify query shape and headroom, not throughput.
 
-**Writes.** `open_catalog()` connects with `sqlite3.connect(path, autocommit=False)`, new in Python 3.12, and `commit_page()` runs inside `with conn:`: it writes the page, updates that mode's cursor, and commits once. Historical pages use `INSERT ... ON CONFLICT(id) DO NOTHING`, so replay never overwrites a saved snapshot. Daily pages use `ON CONFLICT(id) DO UPDATE SET` for `title`, `url`, `text`, `created_at`, and `descendants`. Neither path deletes rows, and both store source strings unchanged, including HTML, Unicode, and empty URL/text.
+**Writes.** `open_catalog()` connects with `sqlite3.connect(path, autocommit=False)`, new in Python 3.12, and `commit_page()` runs inside `with conn:`: it writes the page, updates the historical cursor only for historical pages, and commits once. Historical pages use `INSERT ... ON CONFLICT(id) DO NOTHING`, so replay never overwrites a saved snapshot. Daily pages use `ON CONFLICT(id) DO UPDATE SET` for `title`, `url`, `text`, `created_at`, and `descendants`. Neither path deletes rows, and both store source strings unchanged, including HTML, Unicode, and empty URL/text.
 
 **Cursor.** A full page advances `next_id` to its last ID plus one. A short or empty page also sets `complete = 1`, and historical completion leaves `next_id = through_id + 1`. A crash before commit replays that page; a crash after commit resumes after it. For example, a timeout on page two leaves page one's 10,000 posts and `next_id = 271044` intact.
 
@@ -227,7 +227,7 @@ FORMAT JSON
 | V6 — Incomplete responses and dependency failures | Yes | Invalid payloads, HTTP-200 exceptions, rejected settings, timeouts, quota errors, and overflow leave that page and its cursor uncommitted and exit 1. | An error is neither an empty page nor a deletion signal. |
 | V7 — Interrupted or failed SQLite commits | Yes | A failure or kill rolls back the page and cursor together; reopening keeps earlier commits and replays unfinished work. | Provide durable historical resume. |
 | V8 — Overlapping historical and daily records | Yes | Each HN ID keeps one row; historical inserts leave existing rows untouched, and daily upserts update them in place. | Retain archived posts without version history or delete-and-reinsert. |
-| V9 — Daily window and restart | Yes | Each invocation freezes `[T - 432000, T)` in UTC, includes the lower bound, excludes `T`, and restarts at `next_id = 1` with a new window. | Use creation time, not update time or the last successful run. |
+| V9 — Daily window and restart | Yes | Each invocation freezes `[T - 432000, T)` in UTC, includes the lower bound, excludes `T`, and scans a fresh window even after a failed or interrupted run. | Use creation time, not update time or the last successful run. |
 | V10 — Newly eligible posts and eligible refresh | Yes | A zero-to-five post inside the window is inserted; a still-eligible saved post takes its latest title, URL, text, and count, even when nine drops to six. | Refresh the eligible snapshot, not the maximum count. |
 | V11 — Retention and refresh boundary | Yes | Saved rows that are omitted, drop below five, become deleted, or fall outside the window stay unchanged; no ineligible row is created. | Preserve the last eligible snapshot. |
 | V12 — Failure output | Yes | Failures name the failed operation. | Distinguish durable progress from attempted work. |
@@ -310,16 +310,14 @@ CREATE TABLE posts (
   hn_url TEXT GENERATED ALWAYS AS ('https://news.ycombinator.com/item?id=' || id) VIRTUAL
 );
 CREATE TABLE collection_progress (
-  mode TEXT PRIMARY KEY CHECK (mode IN ('historical', 'daily')),
   source TEXT NOT NULL,
   next_id INTEGER NOT NULL,
   complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
-  from_id INTEGER, through_id INTEGER,      -- historical only
-  window_start INTEGER, window_end INTEGER  -- daily only
+  from_id INTEGER, through_id INTEGER
 );
 ```
 
-`hn_url` keeps the approved HN-link field without storing duplicate bytes: SQLite computes it from `id` on read, saving about 28 MiB at the observed 661,233 posts. Generated columns require SQLite 3.31.0 or newer. [SQLite generated columns](https://www.sqlite.org/gencol.html). `collection_progress` holds at most these two rows, not an attempt log, and resetting `daily` never touches the `historical` row or posts. The ID primary key is the only index. Bind every stored value as a parameter, keep default journaling and synchronous settings, and never use `REPLACE`, which deletes a row before reinserting it. There are no existing migrations. **Deferred — future schema changes:** a later feature must define migration and rollback before adding comment storage or changing v1.
+`hn_url` keeps the approved HN-link field without storing duplicate bytes: SQLite computes it from `id` on read, saving about 28 MiB at the observed 661,233 posts. Generated columns require SQLite 3.31.0 or newer. [SQLite generated columns](https://www.sqlite.org/gencol.html). `collection_progress` holds at most the one historical row, not an attempt log. The ID primary key is the only index. Bind every stored value as a parameter, keep default journaling and synchronous settings, and never use `REPLACE`, which deletes a row before reinserting it. There are no existing migrations. **Deferred — future schema changes:** a later feature must define migration and rollback before adding comment storage or changing v1.
 
 #### File system changes
 
