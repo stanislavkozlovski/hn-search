@@ -182,8 +182,8 @@ No preparatory refactor is needed because no code exists yet. Share one query bu
 
 ### Collection and commit flow
 
-1. **Historical collection:** The first `backfill` fixes the inclusive range `1..max(id)`, which was `1..50235582` on 2026-10-25, and commits `through_id` with `next_id = 1` before fetching a page; `max_id()` runs `SELECT max(id) FROM hackernews_history` without `FINAL`, because every version keeps its ID. Later runs reuse the saved `through_id` and never widen it as the mirror grows; a complete range prints its saved progress line and exits 0 without contacting ClickHouse.
-2. **Daily collection:** `collect_daily()` reads `T = int(time.time())` once and keeps the window `[T - 432000, T)` and its page cursor, starting at `next_id = 1`, in memory. Every invocation, including after a failed or interrupted daily run, scans a fresh window from the start. Daily pages commit posts only, one page per transaction; historical progress is untouched.
+1. **Historical collection:** For each `collect` run, `main()` calls `collect_history()` first. The first run fixes the inclusive range `1..max(id)`, which was `1..50235582` on 2026-10-25, and commits `through_id` with `next_id = 1` before fetching a page; `max_id()` runs `SELECT max(id) FROM hackernews_history` without `FINAL`, because every version keeps its ID. Later runs reuse the saved `through_id`, never widen it as the mirror grows, and resume an incomplete range from the saved `next_id`; a complete range prints its saved progress line without fetching history again.
+2. **Daily collection:** `main()` calls `collect_daily()` only after `collect_history()` returns with the range complete in the same run; a failure or interrupt during history stops the run before this step. `collect_daily()` reads `T = int(time.time())` once and keeps the window `[T - 432000, T)` and its page cursor, starting at `next_id = 1`, in memory. Every run that reaches this step, including after a failed or interrupted earlier run, scans a fresh window from the start. Daily pages commit posts only, one page per transaction; historical progress is untouched.
 3. **Selection:** `fetch_page()` sends the historical query below. Daily pages drop the `through_id` predicate and add `time >= toDateTime({window_start:UInt32}, 'UTC') AND time < toDateTime({window_end:UInt32}, 'UTC')`.
 
 ```sql
@@ -219,7 +219,7 @@ FORMAT JSON
 
 | Validation | Disposition | Behavior or consequence | Reason |
 |---|---|---|---|
-| V1 — Retained historical bound | Yes | `backfill` reruns reuse the saved bound, never widen it as the mirror grows, and a complete range stays complete. | Preserve the selected historical sweep. |
+| V1 — Retained historical bound and run order | Yes | `collect` reruns reuse the saved bound, never widen it as the mirror grows, and a complete range stays complete; a run sends daily queries only after its history step reports complete, never while history is incomplete or after a failure. | Preserve the selected historical sweep; one command orders history before the window. |
 | V2 — Catalog initialization and reopening | Yes | `open_catalog()` initializes an empty file as v1, reopens v1, and rejects unversioned populated files or other versions without modifying them. | No legacy schema exists; saved records must survive reruns. |
 | V3 — Latest-version eligibility under the `play` profile | Yes | Four reported comments fail and five qualify regardless of `kids`; a newer deleted or below-five version hides older eligible ones; requests send only settings equal to the profile's values. | Enforce the admission rule; the read-only profile rejects changed settings. |
 | V4 — Field mapping and content boundary | Yes | `commit_page()` keeps required values and empty strings, `hn_url` derives from `id`, and the collector requests no comment bodies or linked articles. | Store only approved metadata; treat source strings as values. |
@@ -252,16 +252,15 @@ Run `python3 -m unittest discover -s tests` from the repository root for every o
 
 ### End-to-end tests
 
-Through `main()`, with an injected HTTP opener and a real SQLite file, run `backfill` failing on page two, then `backfill` and `daily`, asserting resume, counts, and retention (V7–V12). Before acceptance, run one bounded smoke test against the live playground:
+Through `main()`, with an injected HTTP opener and a real SQLite file, run `collect` failing on history page two, then `collect` twice, asserting resume, counts, and retention (V7–V12). The failed run must send no daily query, and the last run must send only daily queries (V1). Before acceptance, run one bounded smoke test against the live playground:
 
 ```bash
-python3 -m hn_search --db /tmp/hn-smoke.sqlite3 backfill  # Ctrl-C after the first progress line
-python3 -m hn_search --db /tmp/hn-smoke.sqlite3 backfill
-python3 -m hn_search --db /tmp/hn-smoke.sqlite3 backfill
-python3 -m hn_search --db /tmp/hn-smoke.sqlite3 daily
+python3 -m hn_search --db /tmp/hn-smoke.sqlite3 collect  # Ctrl-C after the first progress line
+python3 -m hn_search --db /tmp/hn-smoke.sqlite3 collect
+python3 -m hn_search --db /tmp/hn-smoke.sqlite3 collect
 ```
 
-On 2026-10-25, the range `1..50235582` held 664,002 eligible posts, about 67 pages. The second run must keep the first run's range and resume from its last committed `next_id`, not ID 1, until `complete=true`. The third run must repeat that final line and exit 0 without contacting ClickHouse, leaving the saved IDs unchanged. `daily` must then save the window's eligible posts, 476 on that day, inserting only IDs the import lacked. Only this smoke test runs a full import, and the suite tests no `No` or `Defer` capability.
+On 2026-10-25, the range `1..50235582` held 664,002 eligible posts, about 67 pages. The second run must keep the first run's range and resume from its last committed `next_id`, not ID 1, until `complete=true`. It must then scan the window and save its eligible posts, 476 on that day, inserting only IDs the import lacked. The third run must repeat that `complete=true` line without fetching history, leaving the range and cursor unchanged, then scan a fresh window and exit 0. Only this smoke test runs a full import, and the suite tests no `No` or `Defer` capability.
 
 ## Other considerations
 
@@ -288,11 +287,10 @@ No existing internal API changes. Among the proposed functions, `fetch_page()` r
 **After:** From the repository root, with Python 3.12+:
 
 ```bash
-python3 -m hn_search --db hn.sqlite3 backfill
-python3 -m hn_search --db hn.sqlite3 daily
+python3 -m hn_search --db hn.sqlite3 collect
 ```
 
-`--db` is required. `backfill` takes no bound flags: the first run fixes `1..max(id)`, and later runs resume that stored bound. `daily` has no lookback or catch-up flag. `argparse` usage errors exit 2; incompatible catalogs and collection failures exit 1 with the next action, such as rerunning later with the same database. No HTTP server or environment variable is added.
+`--db` is required. `collect` takes no bound, phase, lookback, or catch-up flags: the first run fixes `1..max(id)`, later runs resume that stored bound, and a run scans the five-day window only after history reports complete. `argparse` usage errors exit 2; incompatible catalogs and collection failures exit 1 with the next action, such as rerunning later with the same database. No HTTP server or environment variable is added.
 
 ### Data model changes
 
@@ -326,7 +324,7 @@ The catalog and progress live only in the `--db` file and SQLite's journal. Add 
 
 ### Deployment
 
-Run the module from the checkout; no database service, package install, or global CLI is required. Run `backfill`, rerunning after any failure, until it reports `complete=true`. Then run `daily` immediately, so its window covers posts created after the historical bound was fixed, and once a day after that, never alongside another collector. **Deferred — daily scheduler:** installing a host scheduler for `daily` is a separate operational change. Stopping or rolling back the collector leaves the SQLite file in place; there is no earlier version or schema to migrate.
+Run the module from the checkout; no database service, package install, or global CLI is required. Run `collect` once a day and again after any failure, never alongside another collector. **Deferred — daily scheduler:** installing a host scheduler for the single `collect` entrypoint is a separate operational change. Stopping or rolling back the collector leaves the SQLite file in place; there is no earlier version or schema to migrate.
 
 -----------------------------------
 
