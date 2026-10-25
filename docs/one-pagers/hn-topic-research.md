@@ -178,7 +178,7 @@ Use Python 3.12+ and only its standard library, mainly `argparse`, `urllib.reque
 
 ### Maintainability and refactor call
 
-No preparatory refactor is needed because no code exists yet. Share one query builder and one page-commit path, but keep historical insert-only writes separate from daily upserts. Inject the clock and the HTTP opener (`urlopen`) for tests. Do not add an adapter registry, ORM, task queue, migration framework, or run-history table.
+No preparatory refactor is needed because no code exists yet. Share one query builder and one page-commit path. Inject the clock and the HTTP opener (`urlopen`) for tests. Do not add an adapter registry, ORM, task queue, migration framework, or run-history table.
 
 ### Collection and commit flow
 
@@ -207,7 +207,7 @@ FORMAT JSON
 
 **Live check (2026-10-25).** The [table](https://play.clickhouse.com/?user=play&query=SHOW%20CREATE%20TABLE%20hackernews_history%20FORMAT%20JSON) still matches the [research note](../research/hn-metadata-sizing.md#source): `ReplicatedReplacingMergeTree` versioned by `update_time` and ordered by `id UInt32`. Its `title`, `url`, and `text` columns are non-nullable `String`, so absent values arrive as `""`. The first historical page returned 10,000 posts, IDs 121–271,043, in 0.54 s; the daily window returned 476 posts in 0.33 s. Each probe read at most 64M rows, far inside the `play` limits: per query, 60 s and 1,000,000 result rows; per client each hour, 3,000 queries, 600 s of execution, and 300 billion rows read. The 664,002 posts eligible that day fill about 67 pages. These checks verify query shape and headroom, not throughput.
 
-**Writes.** `open_catalog()` connects with `sqlite3.connect(path, autocommit=False)`, new in Python 3.12, and `commit_page()` runs inside `with conn:`: it writes the page, updates the historical cursor only for historical pages, and commits once. Historical pages use `INSERT ... ON CONFLICT(id) DO NOTHING`, so replay never overwrites a saved snapshot. Daily pages use `ON CONFLICT(id) DO UPDATE SET` for `title`, `url`, `text`, `created_at`, and `descendants`. Neither path deletes rows, and both store source strings unchanged, including HTML, Unicode, and empty URL/text.
+**Writes.** `open_catalog()` connects with `sqlite3.connect(path, autocommit=False)`, new in Python 3.12, and `commit_page()` runs inside `with conn:`: it writes the page, updates the historical cursor only for historical pages, and commits once. Every page, historical or daily, uses the same statement: `INSERT ... ON CONFLICT(id) DO UPDATE SET` for `title`, `url`, `text`, `created_at`, and `descendants`. A historical page never meets a saved row, because a replay follows a rolled-back attempt and daily pages run only once the historical range is complete. `commit_page()` issues no `DELETE` or `REPLACE` and stores source strings unchanged, including HTML, Unicode, and empty URL/text.
 
 **Cursor.** A full page advances `next_id` to its last ID plus one. A short or empty page also sets `complete = 1`, and historical completion leaves `next_id = through_id + 1`. A crash before commit replays that page; a crash after commit resumes after it. For example, a timeout on page two leaves page one's 10,000 posts and `next_id = 271044` intact.
 
@@ -226,7 +226,7 @@ FORMAT JSON
 | V5 — Pagination and termination | Yes | Each request asks ClickHouse for at most 10,000 rows ordered by `id`; the cursor advances only after a validated page commits, and a short or empty page completes the selection. | Avoid skipped rows, duplicates, and false completion. |
 | V6 — Incomplete responses and dependency failures | Yes | Invalid payloads, HTTP-200 exceptions, rejected settings, timeouts, quota errors, and overflow leave that page and its cursor uncommitted and exit 1. | An error is neither an empty page nor a deletion signal. |
 | V7 — Interrupted or failed SQLite commits | Yes | A failure or kill rolls back the page and cursor together; reopening keeps earlier commits and replays unfinished work. | Provide durable historical resume. |
-| V8 — Overlapping historical and daily records | Yes | Each HN ID keeps one row; historical inserts leave existing rows untouched, and daily upserts update them in place. | Retain archived posts without version history or delete-and-reinsert. |
+| V8 — Overlapping historical and daily records | Yes | Each HN ID keeps one row, updated in place. | Retain archived posts without version history or delete-and-reinsert. |
 | V9 — Daily window and restart | Yes | Each invocation freezes `[T - 432000, T)` in UTC, includes the lower bound, excludes `T`, and scans a fresh window even after a failed or interrupted run. | Use creation time, not update time or the last successful run. |
 | V10 — Newly eligible posts and eligible refresh | Yes | A zero-to-five post inside the window is inserted; a still-eligible saved post takes its latest title, URL, text, and count, even when nine drops to six. | Refresh the eligible snapshot, not the maximum count. |
 | V11 — Retention and refresh boundary | Yes | Saved rows that are omitted, drop below five, become deleted, or fall outside the window stay unchanged; no ineligible row is created. | Preserve the last eligible snapshot. |
