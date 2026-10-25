@@ -65,3 +65,113 @@ For example, a two-hour-old story at six points and zero comments can reach a ma
 | When Stan adds a lens, saved candidates already have decisions for existing lenses. | The new lens only sees newly discovered candidates. | The feed evaluates saved candidates still within the lookback for the new lens. | IGNORE |
 | When two lenses select one story for the same bot and chat, both enqueue it. | Stan receives duplicate links in that destination. | The feed deduplicates delivery across lenses for each bot and chat. | IGNORE |
 | When Telegram accepts a send but its response is lost, the feed cannot confirm delivery. | The sender may duplicate links when retrying. | The feed records uncertain sends and defines retry behavior. | IGNORE |
+| When a sent story gains points in later runs, the sender leaves Stan's earlier message unchanged. | Stan sees later growth only in the feed database, so most messages show points without growth. | The sender edits each sent message with its stories' latest growth while they stay in the ten-hour search. | UNDECIDED — HANDLE / IGNORE |
+
+## Pass 1: High-level design
+
+**Review status:** Stan decided Pass 0's first five rows in review. The new last row, score growth after a story is sent, reopens Pass 0, so Pass 1 is not settled; the rest is drafted for review.
+
+## Proposal
+
+Add an hourly feed run, with its own SQLite database, to the `hn_search` package PR #1 proposes. Each run saves every five-point story from Algolia's ten-hour window, asks the configured model only about stories a lens has not yet judged, and posts each new match once to that lens's bot and chat.
+
+For example, at 10:00 the run first sees a two-hour-old story at 6 points and 0 comments. One batched model call tags it `agents` for the `ai-agents` lens, and that lens's bot posts it. At 11:00 the run records 19 points, so the saved growth reads `6 → 19 points over 60 minutes`; it makes no model call and sends no second message.
+
+### In-scope goals
+
+- Each hourly run queries Algolia's `search_by_date` for stories created in the preceding ten hours with at least five points, and saves each story's HN ID, title, and article URL with one score observation.
+- The feed keeps stories, observations, lens decisions, and deliveries in its own SQLite database without pruning, and never opens PR #1's research archive.
+- Each lens judges a story with the configured model once, and again only after the story's title or URL, or the lens's categories, change.
+- Each run sends every Telegram destination one message, or a batch, with its new matches, and retries a failed send in later runs while the story stays in the ten-hour search.
+- An hourly scheduler on uzealot runs the feed, and only successful runs refresh its Uptime Kuma push monitor.
+
+### Out-of-scope non-goals
+
+This iteration does not write into PR #1's research archive, catch up beyond ten hours, judge saved stories for a new lens, deduplicate across lenses in one chat, or track uncertain sends. Shared storage, new-lens evaluation of saved stories, zero-point watchlists, flat-hour retirement, and commands that search, re-judge, or resend saved stories are deferred.
+
+### Potential scope growth
+
+| Risk | Growth mechanism — when it happens in practice | Explicit cap | Decision |
+|---|---|---|---|
+| Model calls multiply. | When the run asks about each story or lens separately, an hour with ten new stories and three lenses makes 30 calls, and every hourly re-observation of a story adds more. | One structured call per batch of story–lens pairs without a current decision; stories absent from the current search get no calls. | CONSTRAIN |
+| Re-judgment triggers multiply. | When model swaps, prompt edits, or score changes also invalidate saved decisions, each change re-judges up to ten hours of stories and adds invalidation tests. | Only a changed title, article URL, or lens categories re-judges a story; switching the model or prompt reuses saved decisions. | CONSTRAIN |
+| Telegram attempts repeat. | When a bot is blocked or its token is revoked, an uncapped sender retries the same matches every hour, and each retry after a lost response can repeat links. | One attempt per pending match per run, only while its story stays in the ten-hour search, so at most ten hourly attempts; no delivery-confirmation records. | CONSTRAIN |
+| Lens options multiply. | When lenses gain their own point thresholds, keyword rules, schedules, or message formats, each option adds configuration, prompt variants, and tests. | A lens has a name, categories with descriptions, and one bot and chat; every lens shares five-point admission and the hourly run. | CONSTRAIN |
+| Alert paths multiply. | When each failure kind gets its own monitor or message, every new lens, destination, or dependency adds alert configuration. | One Kuma push monitor, refreshed only by successful runs; lens bots send only story messages. | CONSTRAIN |
+
+### Public behavior changes (before / after)
+
+- **Before:** At [this design head](https://github.com/stanislavkozlovski/hn-search/tree/6ce50a9b54d1419fdf79be6c6feb2a011f817f7a), the repository holds only this proposal and the README; PR #1 plans `backfill`, `daily`, and `status` for its research archive. Stan has no lens configuration and receives no HN links in Telegram.
+- **After:** Stan defines lenses in a config file and keeps each bot token in an environment file outside Git. Each hour, a feed run writes only the feed database and posts new matches; PR #1's commands and research archive behave as before, and Kuma gains one push monitor. Exact command, file, and key names belong to Pass 2.
+
+An illustrative lens and message:
+
+```toml
+[[lens]]
+name = "ai-agents"
+bot_token_env = "HN_FEED_AI_AGENTS_BOT_TOKEN"
+chat_id = 123456789
+
+[lens.categories]
+agents = "AI agents, agent frameworks, and tool use"
+evals = "Benchmarks and evaluations of language models"
+```
+
+```text
+ai-agents · 1 new match
+[agents] Ask HN: What is the main bottleneck facing Agentic AI today?
+7 points · https://news.ycombinator.com/item?id=50234108
+```
+
+On 2026-10-25, Algolia returned this Ask HN story with `url: null`, so its message carries only the HN link.
+
+### Feed database
+
+Store stories, observations, lens decisions, and deliveries in a separate SQLite file, as Stan [chose in review](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4372390552). One hourly writer commits each run's state together without a database server. For example, the six-point, zero-comment story is saved in the feed database, while the research archive still admits only posts with at least five comments.
+
+The feed prunes nothing, including stories no lens matched. At the measured 238 stories a day, it saves about 87,000 stories a year, each with up to ten observations.
+
+### Classification
+
+The model receives each story's title and article URL, plus the categories of each lens needing a decision. It tags a story only with categories it clearly fits, favoring fewer irrelevant alerts, and any tag makes a match.
+
+A decision stays valid while the story's title and URL and the lens's categories are unchanged. If HN retitles a saved story, the next run re-judges it; if Stan edits `ai-agents`'s categories, that lens re-judges stories the search still returns. A newly matching story is sent, and one already sent to that lens is not resent. A lens added at 12:00 never judges stories first saved before 12:00.
+
+If the model fails or hits its usage limit, the run leaves those stories unjudged and fails; the next run retries the ones the search still returns.
+
+### Delivery and retries
+
+The sender groups a run's pending matches by bot and chat and sends each destination one message, or a batch when one message would exceed Telegram's length limit; a destination without new matches gets nothing. A story that two lenses match in one chat appears twice.
+
+A failed send stays pending, and each later run tries it once more while its story stays in the ten-hour search. A retry after a lost Telegram response can repeat links. Unsent stories stay saved.
+
+Each observation updates a story's `N → M points over X minutes` from its first and latest points. A lens judges a story at its first observation, so most messages show points without growth; a retried send or a later re-judgment shows it. Growth after a story is sent is the reopened Pass 0 decision.
+
+### Hourly schedule and Kuma alert
+
+A scheduler on uzealot runs the feed hourly as `ops`. As with [Paper Tracker's health job](https://github.com/stanislavkozlovski/uzealot/blob/45c9f154c1677246f9a8a57c6f8a7fa2420d63ee/docs/papertracker.md#monitoring-and-alerts), only a run that finishes without error refreshes the feed's Kuma push monitor, so a stopped scheduler or a failing run alerts through the `Kuma Alert` Telegram channel. Pass 2 sets the missed-heartbeat window shorter than the ten-hour search.
+
+For example, if runs stop at 03:00 and Stan restarts them by 13:00, the next run still finds five-point stories created after 03:00. Kuma also runs on uzealot, so it cannot report a whole-machine power or network outage.
+
+## Rejected design alternatives
+
+| Alternative | Why rejected |
+|---|---|
+| The feed writes its stories into PR #1's research archive. | The archive's `descendants >= 5` check rejects low-comment stories, and Stan chose separate storage. |
+| The feed polls the official HN API's new-story list and fetches each item. | The feed would request every story separately each hour to read its points and creation time, while one Algolia query filters both. |
+| The run asks the model about every returned story every hour. | The run would repeat each judgment up to ten times while a story stays in the ten-hour search. |
+| The classifier tags stories against one taxonomy that all lenses share. | Editing one lens's categories would invalidate every lens's saved decisions. |
+| The run pings Kuma when it starts. | A run that starts and then fails would still look healthy. |
+
+-----------------------------------
+
+# Legend (do not delete)
+
+Scope growth labels mean:
+
+- **INCLUDE** accepts the resulting scope;
+- **CONSTRAIN** limits the behavior that causes it;
+- **EXCLUDE** leaves the broader work outside this proposal.
+
+Each label is valid only when its row also names the repeatable growth
+mechanism and a finite, observable cap.
