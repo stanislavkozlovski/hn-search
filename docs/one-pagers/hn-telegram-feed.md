@@ -27,6 +27,8 @@ The first delivery uses hourly overlapping search; zero-point watchlists and spe
 
 Keep every saved story without pruning, including stories no lens matched, along with its score observations and lens decisions, so Stan can [revisit a story later](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4372384723).
 
+Alert through Uptime Kuma when the hourly job stops running, as Stan [asked in review](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4372391526).
+
 **Deferred — shared storage:** Stan [keeps the feed's storage separate from the research archive for now](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4372390552); merging them is outside the first delivery.
 
 **Deferred — revisiting saved stories:** Commands that search saved stories, re-run lenses over them, or resend them are outside the first delivery.
@@ -55,7 +57,7 @@ For example, a two-hour-old story at six points and zero comments can reach a ma
 | Edge case | What happens if ignored | What handling it adds | User decision |
 |---|---|---|---|
 | When Stan feeds five-point, low-comment stories into PR #1's research archive, the archive's `posts.descendants >= 5` check rejects them. | The feed needs separate storage while the research archive stays unchanged. | The feed extends the research archive's schema while preserving its records and checkpoints and defining upgrade and older-collector behavior. | IGNORE |
-| When the hourly job stays offline for more than ten hours, its next rolling query excludes older missed stories. | Stan misses those older stories after restart. | The feed catches up missed intervals beyond the normal lookback. | UNDECIDED — HANDLE / IGNORE |
+| When the hourly job stays offline for more than ten hours, its next rolling query excludes older missed stories. | Stan misses those older stories after restart. | The feed catches up missed intervals beyond the normal lookback. | IGNORE |
 | When Stan adds a lens, saved candidates already have decisions for existing lenses. | The new lens only sees newly discovered candidates. | The feed evaluates saved candidates still within the lookback for the new lens. | UNDECIDED — HANDLE / IGNORE |
 | When two lenses select one story for the same bot and chat, both enqueue it. | Stan receives duplicate links in that destination. | The feed deduplicates delivery across lenses for each bot and chat. | UNDECIDED — HANDLE / IGNORE |
 | When Telegram accepts a send but its response is lost, the feed cannot confirm delivery. | The sender may duplicate links when retrying. | The feed records uncertain sends and defines retry behavior. | UNDECIDED — HANDLE / IGNORE |
