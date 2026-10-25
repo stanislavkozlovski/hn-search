@@ -182,7 +182,7 @@ No preparatory refactor is needed because no code exists yet. Share one query bu
 
 ### Collection and commit flow
 
-1. **Historical collection:** The first `backfill` fixes inclusive bounds and commits them before fetching a page. The default is `1..max(id)`, which was `1..50235582` on 2026-10-25; `max_id()` runs `SELECT max(id) FROM hackernews_history` without `FINAL`, because every version keeps its ID. Explicit bounds replace either default and must satisfy `1 <= from_id <= through_id <= max(id)`. Later runs reuse the saved bounds: repeated flags pass, different flags fail without touching progress, and a complete range prints its saved progress line and exits 0 without contacting ClickHouse.
+1. **Historical collection:** The first `backfill` fixes the inclusive range `1..max(id)`, which was `1..50235582` on 2026-10-25, and commits `through_id` with `next_id = 1` before fetching a page; `max_id()` runs `SELECT max(id) FROM hackernews_history` without `FINAL`, because every version keeps its ID. Later runs reuse the saved `through_id` and never widen it as the mirror grows; a complete range prints its saved progress line and exits 0 without contacting ClickHouse.
 2. **Daily collection:** `collect_daily()` reads `T = int(time.time())` once and keeps the window `[T - 432000, T)` and its page cursor, starting at `next_id = 1`, in memory. Every invocation, including after a failed or interrupted daily run, scans a fresh window from the start. Daily pages commit posts only, one page per transaction; historical progress is untouched.
 3. **Selection:** `fetch_page()` sends the historical query below. Daily pages drop the `through_id` predicate and add `time >= toDateTime({window_start:UInt32}, 'UTC') AND time < toDateTime({window_end:UInt32}, 'UTC')`.
 
@@ -219,7 +219,7 @@ FORMAT JSON
 
 | Validation | Disposition | Behavior or consequence | Reason |
 |---|---|---|---|
-| V1 — Command arguments and retained historical bounds | Yes | `backfill` rejects malformed, reversed, out-of-range, or conflicting bounds without touching saved work; reruns never widen the range as the mirror grows, and a complete range stays complete. | Preserve the selected historical sweep. |
+| V1 — Retained historical bound | Yes | `backfill` reruns reuse the saved bound, never widen it as the mirror grows, and a complete range stays complete. | Preserve the selected historical sweep. |
 | V2 — Catalog initialization and reopening | Yes | `open_catalog()` initializes an empty file as v1, reopens v1, and rejects unversioned populated files or other versions without modifying them. | No legacy schema exists; saved records must survive reruns. |
 | V3 — Latest-version eligibility under the `play` profile | Yes | Four reported comments fail and five qualify regardless of `kids`; a newer deleted or below-five version hides older eligible ones; requests send only settings equal to the profile's values. | Enforce the admission rule; the read-only profile rejects changed settings. |
 | V4 — Field mapping and content boundary | Yes | `commit_page()` keeps required values and empty strings, `hn_url` derives from `id`, and the collector requests no comment bodies or linked articles. | Store only approved metadata; treat source strings as values. |
@@ -244,7 +244,7 @@ FORMAT JSON
 
 ### Unit tests
 
-Run `python3 -m unittest discover -s tests` from the repository root for every offline test. `test_clickhouse.py` feeds canned bodies through an injected `urlopen` to cover V4–V6: complete, empty, truncated, malformed, and HTTP-error responses. `test_collect.py` uses a fake clock and source for V1 and V8–V11, including exact window edges and eight days offline; one saved post moving `5 → 9 → 6 → 4 → deleted` must end with its six-comment snapshot. `test_cli.py` covers V1 and V12, including exit codes.
+Run `python3 -m unittest discover -s tests` from the repository root for every offline test. `test_clickhouse.py` feeds canned bodies through an injected `urlopen` to cover V4–V6: complete, empty, truncated, malformed, and HTTP-error responses. `test_collect.py` uses a fake clock and source for V1 and V8–V11, including exact window edges and eight days offline; one saved post moving `5 → 9 → 6 → 4 → deleted` must end with its six-comment snapshot. `test_cli.py` covers V12, including exit codes.
 
 ### Integration tests
 
@@ -255,12 +255,13 @@ Run `python3 -m unittest discover -s tests` from the repository root for every o
 Through `main()`, with an injected HTTP opener and a real SQLite file, run `backfill` failing on page two, then `backfill` and `daily`, asserting resume, counts, and retention (V7–V12). Before acceptance, run one bounded smoke test against the live playground:
 
 ```bash
-python3 -m hn_search --db /tmp/hn-smoke.sqlite3 backfill --through-id 300000
+python3 -m hn_search --db /tmp/hn-smoke.sqlite3 backfill  # Ctrl-C after the first progress line
+python3 -m hn_search --db /tmp/hn-smoke.sqlite3 backfill
 python3 -m hn_search --db /tmp/hn-smoke.sqlite3 backfill
 python3 -m hn_search --db /tmp/hn-smoke.sqlite3 daily
 ```
 
-On 2026-10-25, IDs 1–300,000 held 10,993 eligible posts: one full page, one short page, then `complete=true`. The rerun must leave the saved IDs unchanged, and `daily` must add the current window's eligible posts, 476 on that day. The suite needs no full import and tests no `No` or `Defer` capability.
+On 2026-10-25, the range `1..50235582` held 664,002 eligible posts, about 67 pages. The second run must keep the first run's range and resume from its last committed `next_id`, not ID 1, until `complete=true`. The third run must repeat that final line and exit 0 without contacting ClickHouse, leaving the saved IDs unchanged. `daily` must then save the window's eligible posts, 476 on that day, inserting only IDs the import lacked. Only this smoke test runs a full import, and the suite tests no `No` or `Defer` capability.
 
 ## Other considerations
 
@@ -287,11 +288,11 @@ No existing internal API changes. Among the proposed functions, `fetch_page()` r
 **After:** From the repository root, with Python 3.12+:
 
 ```bash
-python3 -m hn_search --db hn.sqlite3 backfill [--from-id N] [--through-id N]
+python3 -m hn_search --db hn.sqlite3 backfill
 python3 -m hn_search --db hn.sqlite3 daily
 ```
 
-`--db` is required. Bound flags take effect on the first `backfill`; later runs resume the stored bounds. `daily` has no lookback or catch-up flag. `argparse` usage errors exit 2; invalid bounds, incompatible catalogs, and collection failures exit 1 with the next action, such as rerunning later with the same database. No HTTP server or environment variable is added.
+`--db` is required. `backfill` takes no bound flags: the first run fixes `1..max(id)`, and later runs resume that stored bound. `daily` has no lookback or catch-up flag. `argparse` usage errors exit 2; incompatible catalogs and collection failures exit 1 with the next action, such as rerunning later with the same database. No HTTP server or environment variable is added.
 
 ### Data model changes
 
@@ -313,7 +314,7 @@ CREATE TABLE collection_progress (
   source TEXT NOT NULL,
   next_id INTEGER NOT NULL,
   complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
-  from_id INTEGER, through_id INTEGER
+  through_id INTEGER
 );
 ```
 
