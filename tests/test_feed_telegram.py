@@ -1,4 +1,5 @@
 from dataclasses import replace
+from http.client import IncompleteRead, InvalidURL
 from io import BytesIO
 import json
 from urllib.error import HTTPError, URLError
@@ -48,7 +49,7 @@ class TelegramTests(FeedCase):
 
     def test_api_and_transport_errors_never_expose_token_or_request_url(self):
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        cases = [URLError(url), TimeoutError(url),
+        cases = [URLError(url), TimeoutError(url), IncompleteRead(b'{"ok":', 10), InvalidURL(url),
                  {"ok": False, "error_code": 403, "description": f"Forbidden {url} {TOKEN}"},
                  HTTPError(url, 403, url, {}, BytesIO(b'{"ok":false,"description":"Forbidden"}')),
                  {"ok": True, "result": {"message_id": True}}]

@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from html import escape
+from http.client import HTTPException
 import json
 import re
 from urllib.error import HTTPError, URLError
@@ -80,7 +81,7 @@ def _request(message, method, tokens, *, opener):
             response = error
         with response:
             body = json.load(response)
-    except (URLError, OSError, ValueError, UnicodeError) as error:
+    except (HTTPException, URLError, OSError, ValueError, UnicodeError) as error:
         # Transport exceptions can contain the complete secret-bearing request URL.
         raise TelegramError(f"{message.bot_token_env}: Telegram request failed ({type(error).__name__})") from None
     if not isinstance(body, dict):
