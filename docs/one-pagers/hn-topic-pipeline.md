@@ -125,7 +125,7 @@ This design adds no daily collection schedule, external article fetching, or dis
 | Calls multiply with thread size. | When a discussion like `42057647` outgrows one call, each part adds a call per stage, and the part results can outgrow the combining call. | Parts hold whole reply subtrees and cover each comment once; at most one combining call for a split description or analysis, with no second merge level; part results that do not fit one call leave the story `oversized`. | CONSTRAIN |
 | Saved results multiply with wording and settings. | When Stan rephrases a question or changes a model, effort, or prompt, every matched story gets a new result instead of reusing one. | Reuse requires an exact match of stage, prompt version, model, effort, archive, and, for verdicts and analyses, the approved question text; questions are never matched by similarity, and nothing is deleted automatically. | CONSTRAIN |
 | Prompts multiply with stages. | When a stage gains a variant, such as combining part results, it adds a versioned prompt, an output schema, and a reuse key for Pass 2 to specify. | Eight prompts: settings, keywords and question, description, verdict, deep analysis, synthesis, description combining, and analysis combining. | CONSTRAIN |
-| Output files multiply with runs. | When Stan reruns or asks a new question, each run writes another folder tree. | One folder per run, holding `report.md` and one `stories/<id>/` folder per relevant story with `thread.json` and `analysis.md`; no HTML or PDF. | CONSTRAIN |
+| Output files multiply with runs. | When Stan reruns or asks a new question, each run writes another folder tree. | One folder per run, holding `report.md` and one `stories/<id>/` folder per relevant story with `thread.json`, `thread.md`, and `analysis.md`; `thread.md` converts only paragraphs, italics, code, links, and HTML entities; no HTML or PDF. | CONSTRAIN |
 
 ### Public behavior changes (before / after)
 
@@ -178,8 +178,9 @@ research/run-1/
 ├── report.md            # synthesis, thread index, coverage
 └── stories/
     └── 40490610/
+        ├── thread.md    # story link and every saved comment, in Markdown
         ├── thread.json  # the archive's JSON export
-        └── analysis.md  # description, verdict reasons, deep analysis
+        └── analysis.md  # story link, description, verdict reasons, deep analysis
 ```
 
 If an AI call fails, `research` prints the story and stage, then exits 1 with the client's typed error, such as `CodexTimeoutError` or `CodexRateLimitError`; Ctrl-C also stops it. A Codex usage limit stops the run the same way, without waiting for the reset; the printed error is Codex's own message, which [names the reset time](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/protocol/src/error.rs#L836-L852), such as “try again at 3:15 PM,” when Codex reports one. Every finished result stays saved, but no command resumes the stopped run: Stan starts a new run and repeats both conversations, and that run reuses saved descriptions when the settings match and saved verdicts and analyses only when he also approves the identical question.
@@ -224,7 +225,22 @@ Stan [asked for tests](https://github.com/stanislavkozlovski/hn-search/pull/6#di
 
 ### Folders, analyses, and the report
 
-Each relevant story's folder gets the archive's JSON export as `thread.json`. Deep analysis then writes `analysis.md`: the description and verdict reasons, followed by the arguments, counterarguments, assumptions, conditions, lived experiences, and unresolved disagreements, each linked to its comments. The model returns comment IDs, and the pipeline renders them as `https://news.ycombinator.com/item?id=<id>` links.
+Each relevant story's folder gets the archive's JSON export as `thread.json` and a Markdown rendering of the same saved snapshot as `thread.md`. Deep analysis then writes `analysis.md`: links to the story on HN and to `thread.md`, the description and verdict reasons, followed by the arguments, counterarguments, assumptions, conditions, lived experiences, and unresolved disagreements, each linked to its comments. The model returns comment IDs, and the pipeline renders them as `https://news.ycombinator.com/item?id=<id>` links.
+
+`thread.md` opens with the story title linked to its HN page, the article link, the author, the posting date, the reported comment count, and the archive date. Every saved comment follows as a nested bullet in display order, one level per reply, with its author, its time linked to the comment on HN, and its text converted from HN's HTML. Deleted, flagged, and unavailable items keep their place as `[deleted]`, `[flagged]`, or `[unavailable]`, so the reply tree stays intact. Each comment's bullet ends with an Obsidian block ID such as `^c40494448`, so a link can point at one comment; Obsidian [allows block IDs on list lines but not inside quotations](https://obsidian.md/help/Linking+notes+and+files/Internal+links), so replies nest as bullets rather than `>` quotes.
+
+```markdown
+# [Priced out of home ownership](https://news.ycombinator.com/item?id=40490610)
+
+[bbc.co.uk](https://www.bbc.co.uk/news/articles/cmj66r4lvzzo) · user20180120 · 2024-05-27 · 1,245 reported comments · archived 2026-10-26
+
+- **tmnvix** · [2024-05-27 20:38 UTC](https://news.ycombinator.com/item?id=40494448)
+  (tmnvix's comment, in Markdown) ^c40494448
+  - **dan-robertson** · [2024-05-27 21:11 UTC](https://news.ycombinator.com/item?id=40494752)
+    (dan-robertson's reply, in Markdown) ^c40494752
+```
+
+The archive design [keeps Markdown exports out of `archive`](https://github.com/stanislavkozlovski/hn-search/blob/69a87347260824bd030383fec7f00c7609106c16/docs/one-pagers/hn-comment-archives.md?plain=1#L71), so the pipeline renders `thread.md` from the archive's saved records, and `archive` does not change. HN comments carry only [paragraphs, italics, code, and links](https://news.ycombinator.com/formatdoc), so the conversion handles those four plus HTML entities; Pass 2 specifies it, including escaping comment text that Obsidian would read as a link, tag, or heading.
 
 One synthesis call reads every relevant analysis and writes the cross-thread sections of `report.md`. The pipeline then appends the thread index and coverage from saved state. The index lists each relevant story's title, HN link, folder, and description. Coverage lists every other matched story under `not downloaded`, `unavailable`, `oversized`, `uncertain`, or `irrelevant`, each with its reason.
 
