@@ -117,6 +117,8 @@ The first `archive` run adds both tables and moves `user_version` from 1 to 2 in
 
 `archive` handles requested roots in order, one story and one HN request at a time. Saved items are the checkpoint: pending IDs are recomputed from SQLite, so no separate queue has to survive a crash.
 
+**Request pacing:** Checked on 2026-10-26, the [official Firebase HN API documentation](https://github.com/HackerNews/API/blob/6b8d4500a0c4c4a880a678928cc6d5e20e764015/README.md#uri-and-versioning) states that there is currently no rate limit and supplies no numeric requests-per-second quota. `archive` adds no fixed sleep or automatic retry; an HTTP failure, including HTTP 429 if encountered, leaves the failed ID pending and exits 1 as in step 5.
+
 1. **Check the catalog.** Drop repeated IDs, keeping their order. If any ID has no `posts` row, print one error per missing ID and stop before any request.
 2. **Skip finished stories.** A root whose archive is `complete` sends no request and goes straight to step 6.
 3. **Open or resume.** Create the root's `archives` row as `incomplete` with `started_at`, or keep its existing incomplete row. Pending IDs are the root if it is unsaved, plus every ID listed in a saved item's `kids`, or in a saved poll root's `parts`, that has no `archive_items` row.
