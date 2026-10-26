@@ -1,0 +1,1 @@
+stan-ai-client==0.1.19
