@@ -99,7 +99,7 @@ This design adds no daily collection schedule, external article fetching, or dis
 
 ### In-scope goals
 
-- `research` runs the approved order in one terminal session and prints a line for each story at each stage.
+- `research` runs the approved order in one terminal session and shows live progress: a spinner and clock while an AI reply or the search is pending, then a stage checklist that redraws in place with counts and the call in flight. When output is not a terminal, it prints one line per story at each stage instead.
 - Search matches each approved keyword as a whole-word phrase in catalog titles, URLs, and post text.
 - After every search, a gate shows the matches and the work ahead; nothing downloads or calls AI until Stan proceeds.
 - A keyword reply can also revise the question, and the approved question drives every later stage.
@@ -149,11 +149,16 @@ Keywords: buy vs rent, home ownership, mortgage, renting
 Next: download 461 stories, then 922 classification calls (0 reused), one analysis per relevant story, and one report.
 Proceed, or say how to change the keywords?
 > proceed
-...
-classify 40490610 relevant "Priced out of home ownership"
-...
-report research/run-1/report.md
+relevant 40490610 "Priced out of home ownership"
+✓ search    461 stories
+✓ download  461/461
+⠼ classify  212/461 · 31 relevant · 6 uncertain · 175 irrelevant
+            verdict 31279809 · gpt-6-luna high · 41s
+· analyze
+· report
 ```
+
+The last six lines redraw in place; their tallies here are illustrative. When the run finishes, the checklist stays on screen with every row checked, and `report research/run-1/report.md` prints below it.
 
 ```text
 research/run-1/
@@ -173,6 +178,12 @@ Each round of the settings and keyword conversations resends the short exchange 
 Each keyword round returns a question and a list, and the CLI shows both. If Stan replies “focus on Europe,” the question becomes “Is buying a home better than renting in Europe?” while the keywords usually stay, because a keyword can only widen the search. Approval covers the question and the list on screen, and classification, analysis, the report, and reuse all use the approved question.
 
 After each approval, the CLI searches and shows the gate, with no size threshold, because the per-keyword counts help even on small runs. Stan's reply goes to the keyword prompt: an approval proceeds, and a change shows the revised list, whose approval searches again.
+
+### Progress display
+
+Stan [asked for progress like kibox's](https://github.com/stanislavkozlovski/hn-search/pull/6#discussion_r4376514177). After the gate, `research` keeps a checklist at the bottom of the terminal, one row per stage, and redraws it in place: `✓` marks a finished stage, a spinner the running one, and `·` the stages ahead. The running row shows its count and, during classification, the verdict tallies; the line under it names the call in flight, its model and effort, and the seconds since it started. `run_structured` blocks without streaming, so a ticker thread redraws once a second to keep the spinner and clock moving. Lines worth keeping, such as each relevant verdict, each story that did not download, and each `oversized` story, print above the checklist and scroll normally. While a conversation round or the search waits, one spinner line with a clock shows instead, and nothing redraws while Stan types.
+
+The redraw uses ANSI escape codes, so `research` adds no dependency. `archive_story()` [prints its own line per story](https://github.com/stanislavkozlovski/hn-search/blob/69a87347260824bd030383fec7f00c7609106c16/docs/one-pagers/hn-comment-archives.md?plain=1#L141-L145), so the pipeline captures that line and shows it as an event instead of changing the archive. When stdout is not a terminal, nothing redraws: each event and each story's finished stage prints as one plain line. On a failure or Ctrl-C, the checklist keeps its last state and the error prints below it.
 
 ### Search
 
@@ -224,7 +235,7 @@ AI calls run one at a time with each stage's model and effort. They drop the cli
 | Search matches keywords as substrings. | In eligible titles, [substring `renting` matches 145 stories](https://play.clickhouse.com/?user=play&query=SELECT%20countIf%28positionCaseInsensitive%28title%2C%20%27renting%27%29%20%3E%200%29%20AS%20substring_renting%2C%20countIf%28match%28lower%28title%29%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29renting%28%5B%5E0-9a-z%5D%7C%24%29%27%29%29%20AS%20word_renting%2C%20countIf%28positionCaseInsensitive%28title%2C%20%27parenting%27%29%20%3E%200%29%20AS%20parenting%2C%20countIf%28positionCaseInsensitive%28title%2C%20%27rent%27%29%20%3E%200%29%20AS%20substring_rent%2C%20countIf%28match%28lower%28title%29%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29rent%28%5B%5E0-9a-z%5D%7C%24%29%27%29%29%20AS%20word_rent%20FROM%20hackernews_history%20FINAL%20WHERE%20type%20IN%20%28%27story%27%2C%20%27poll%27%2C%20%27job%27%29%20AND%20parent%20%3D%200%20AND%20deleted%20%3D%200%20AND%20descendants%20%3E%3D%205%20FORMAT%20JSON), 63 of them containing “parenting,” while whole-word `renting` matches 70; substring `rent` matches 5,071 stories, against 439 for the whole word. |
 | Search uses an SQLite FTS5 index with stemming. | FTS5 needs a schema migration and a full-text index over every post, and its tokenizer and stemmer decide matches that the gate's keyword list does not show. |
 | The conversations resume one Codex session through `CodexRunOptions.session_id`. | `run_structured` returns the session's `thread_id` only with `capture_usage=True`, and the session keeps hidden state in Codex's own store; resending the exchange keeps each round self-contained. |
-| `research` is a full-screen TUI. | A TUI framework would add a dependency and screen handling to a sequence of prompts and progress lines. |
+| `research` is a full-screen TUI. | A TUI framework would add a dependency and take over the screen, while a few ANSI escape codes redraw the progress checklist in place between the line-based prompts. |
 | The synthesis model writes the thread index and coverage. | The model could drop or miscount threads; the pipeline writes both from saved state, so every relevant thread and every omission appears. |
 | Several AI calls run at once. | Parallel calls would shorten runs but add coordination and reach Codex usage limits sooner. |
 
