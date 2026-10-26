@@ -485,7 +485,7 @@ Install `requirements.txt`, then run `python3 -m unittest discover -s tests` for
 
 ### Integration tests
 
-`test_feed_store.py` uses temporary real SQLite files for V1, V4, V5, and V13. A file from `open_catalog()` is refused and keeps its posts and `user_version = 1`; reopening a feed file keeps every row; a lens added at 12:00 skips stories first saved at 11:00; a child process killed after `record_message()` leaves its line committed.
+`test_feed_store.py` uses temporary real SQLite files for V1, V4, V5, and V13. A file from `open_catalog()` is refused and keeps its posts and `user_version = 1`; reopening a feed file keeps every row; a lens added at 12:00 skips stories first saved at 11:00; when `run_feed()` sends two messages, `RecordingOpener`, on receiving the second `sendMessage`, opens a second SQLite connection to the feed file and finds the first message's `messages` row, with its Telegram message ID, and its `message_lines` already committed, so the check needs no child process.
 
 ### End-to-end tests
 
