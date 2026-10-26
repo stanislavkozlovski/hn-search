@@ -333,7 +333,7 @@ This pass read Codex's source at `970111f` and its docs but could not run the in
 | `hn_search/research/prompts.py` | The seven templates, their `StructuredSchema`s, and their versions. |
 | `hn_search/research/ai.py` | `CONTEXT_WINDOWS`, `TIMEOUTS`, `run_options()`, and `run_stage()`, the only caller of `CodexClient.run_structured`, which also checks units and citations. |
 | `hn_search/research/store.py` | `migrate()`, run rows, reuse lookups, and one-transaction saves. |
-| `hn_search/research/render.py` | `html_to_markdown()`, `thread_md()`, `analysis_md()`, `report_md()`, and `write_atomic()`. |
+| `hn_search/research/render.py` | `html_to_markdown()`, `thread_md()`, `analysis_md()`, and `report_md()`. |
 | `hn_search/research/progress.py` | `Progress`: the checklist, its ticker thread, and plain-line mode. |
 | `tests/test_research_*.py` | One test file per module above. |
 
@@ -459,7 +459,7 @@ A verdict reply in the sample run looks like this:
 
 With `escape=True`, which every Markdown file uses, text outside code gets a backslash before each `\`, `` ` ``, `*`, `_`, `[`, `]`, `<`, `>`, `#`, `^`, `|`, `$`, `%`, `=`, and `~`, and before a `-`, `+`, or `1.` that starts a line. Comment text therefore cannot form a wikilink, tag, heading, block ID, comment, highlight, math, or list. AI text is escaped the same way after its `[c<ID>]` markers are cut out. Each marker then becomes `[[./thread#^c<ID>|<author>]]` in `analysis.md` or `[[./stories/<story>/thread#^c<ID>|<author>]]` in `report.md`.
 
-`thread_md()` writes Pass 1's header, a poll's options with their votes, and then one bullet per comment, indented two spaces per reply level. `^c<ID>` ends the bullet's first paragraph, which holds the author line and the comment's first paragraph, because Obsidian [reads a list item's block ID on its bullet](https://obsidian.md/help/Linking+notes+and+files/Internal+links); later paragraphs and code follow after a blank line. `report_md()` opens with the approved question as its title and one line listing the keywords and the four model settings. `write_atomic()` writes each file under a temporary name in its folder and renames it.
+`thread_md()` writes Pass 1's header, a poll's options with their votes, and then one bullet per comment, indented two spaces per reply level. `^c<ID>` ends the bullet's first paragraph, which holds the author line and the comment's first paragraph, because Obsidian [reads a list item's block ID on its bullet](https://obsidian.md/help/Linking+notes+and+files/Internal+links); later paragraphs and code follow after a blank line. `report_md()` opens with the approved question as its title and one line listing the keywords and the four model settings.
 
 Codex cuts each command's output to the models' 10,000-token [`truncation_policy`](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/models-manager/models.json#L15-L18) before the model [sees it](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/core/src/tools/mod.rs#L89-L101): it [replaces the cut middle with `…N tokens truncated…`](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/utils/string/src/truncate.rs#L27) and [adds `Total output lines`](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/core/src/tools/mod.rs#L107-L109). The `folder_synthesis` prompt therefore carries one sentence: when a read comes back with that truncation warning, re-read the missing lines by range or with a larger `max_output_tokens` before writing the synthesis.
 
@@ -610,7 +610,7 @@ CREATE TABLE IF NOT EXISTS ai_results (
 
 #### File system changes
 
-- `<out>/run-<id>/` holds Pass 1's tree, and `write_atomic()` writes every file in it.
+- `<out>/run-<id>/` holds Pass 1's tree.
 - Each run has one `TemporaryDirectory` under `$TMPDIR`, removed on exit, including after a failure. `archive_story()` writes every matched story's JSON export into its `exports/`, and its empty `cwd/` is the inline calls' working folder.
 - `.gitignore` gains `/research/`.
 - `--ephemeral` keeps Codex session files out of `~/.codex/sessions`.
