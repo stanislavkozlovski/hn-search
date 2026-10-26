@@ -101,7 +101,7 @@ This design adds no daily collection schedule, external article fetching, or dis
 
 - `research` runs the approved order in one terminal session and shows live progress: a spinner and clock while an AI reply or the search is pending, then a stage checklist that redraws in place with counts and the call in flight. When output is not a terminal, it prints one line per story at each stage instead.
 - Search matches each approved keyword as a whole-word phrase in catalog titles, URLs, and post text.
-- After every search, a gate shows the matches and the work ahead; nothing downloads or calls AI until Stan proceeds.
+- After every search, a gate shows the matches, each keyword's three largest matches, and the work ahead; nothing downloads or calls AI until Stan proceeds.
 - A keyword reply can also revise the question, and the approved question drives every later stage.
 - Downloads go through the [archive design](https://github.com/stanislavkozlovski/hn-search/blob/design/hn-comment-archives/docs/one-pagers/hn-comment-archives.md#topic-pipeline-handoff)'s `archive_story()`; a story that fails to download, or whose root HN returns as `null`, is skipped and listed in coverage.
 - Classification saves a reusable description and a verdict on the question: `relevant`, `uncertain`, or `irrelevant`. Only relevant stories get folders and deep analysis.
@@ -146,6 +146,19 @@ Question: Is buying a home better than renting?
 Keywords: buy vs rent, home ownership, mortgage, renting
 > go
 461 stories match (28,281 reported comments): buy vs rent 3 · home ownership 27 · mortgage 265 · renting 176
+Top matches by reported comments:
+  buy vs rent     48595251    19  Renting vs. Buying – A case study for Bangalore
+                   3408816    15  Buy (and rent) vs buy: a hacker's view on housing
+                   1781264     8  Ask HN: When to buy vs rent servers?
+  home ownership  40490610  1245  Priced out of home ownership
+                  48281611   866  The real cost of owning a home
+                  26871164   482  Home ownership is the West’s biggest economic-policy mistake
+  mortgage        31279809   740  Homes in 97% of U.S. cities are overvalued, Moody's says
+                  31189088   493  Rocket Mortgage to trim 8% of workforce as home-loan market shrinks
+                  46673809   433  Show HN: I quit coding years ago. AI brought me back
+  renting         29696653   500  The absurdity of renting a car will no longer be tolerated
+                  30132560   496  Ask HN: At a peak of my dev career, I hate my life
+                  16899541   478  Renting is Throwing Money Away, Right? (2015)
 Next: download 461 stories, then 922 classification calls (0 reused), one analysis per relevant story, and one report.
 Proceed, or say how to change the keywords?
 > proceed
@@ -177,7 +190,7 @@ Each round of the settings and keyword conversations resends the short exchange 
 
 Each keyword round returns a question and a list, and the CLI shows both. If Stan replies “focus on Europe,” the question becomes “Is buying a home better than renting in Europe?” while the keywords usually stay, because a keyword can only widen the search. Approval covers the question and the list on screen, and classification, analysis, the report, and reuse all use the approved question.
 
-After each approval, the CLI searches and shows the gate, with no size threshold, because the per-keyword counts help even on small runs. Stan's reply goes to the keyword prompt: an approval proceeds, and a change shows the revised list, whose approval searches again.
+After each approval, the CLI searches and shows the gate, with no size threshold, because the per-keyword counts help even on small runs. Under the counts, the gate lists each keyword's three matches with the most reported comments, with ID, count, and title, so Stan sees what a keyword pulls in before anything downloads. In the [2026-10-26 mirror](https://play.clickhouse.com/?user=play&query=SELECT%20kw%2C%20id%2C%20descendants%2C%20title%20FROM%20%28SELECT%20id%2C%20descendants%2C%20title%2C%20arrayFilter%28%28k%2C%20m%29%20-%3E%20m%2C%20%5B%27buy%20vs%20rent%27%2C%20%27home%20ownership%27%2C%20%27mortgage%27%2C%20%27renting%27%5D%2C%20%5Bmatch%28t%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29buy%5B%5E0-9a-z%5D%2Bvs%5B%5E0-9a-z%5D%2Brent%28%5B%5E0-9a-z%5D%7C%24%29%27%29%2C%20match%28t%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29home%5B%5E0-9a-z%5D%2Bownership%28%5B%5E0-9a-z%5D%7C%24%29%27%29%2C%20match%28t%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29mortgage%28%5B%5E0-9a-z%5D%7C%24%29%27%29%2C%20match%28t%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29renting%28%5B%5E0-9a-z%5D%7C%24%29%27%29%5D%29%20AS%20kws%20FROM%20%28SELECT%20id%2C%20descendants%2C%20title%2C%20lower%28concat%28title%2C%20%27%20%27%2C%20url%2C%20%27%20%27%2C%20text%29%29%20AS%20t%20FROM%20hackernews_history%20FINAL%20WHERE%20type%20IN%20%28%27story%27%2C%20%27poll%27%2C%20%27job%27%29%20AND%20parent%20%3D%200%20AND%20deleted%20%3D%200%20AND%20descendants%20%3E%3D%205%29%29%20ARRAY%20JOIN%20kws%20AS%20kw%20ORDER%20BY%20kw%2C%20descendants%20DESC%20LIMIT%203%20BY%20kw%20FORMAT%20JSON), `buy vs rent`'s third match was “Ask HN: When to buy vs rent servers?” and `renting`'s two largest were a car-rental thread and an Ask HN about hating a dev career. Nothing is classified yet, so the ranking uses reported comments, which also drive the work ahead; a story appears under each keyword it matches, and a keyword with fewer than three matches lists them all. Stan's reply goes to the keyword prompt: an approval proceeds, and a change shows the revised list, whose approval searches again.
 
 ### Progress display
 
