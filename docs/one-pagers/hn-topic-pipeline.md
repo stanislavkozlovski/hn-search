@@ -299,6 +299,329 @@ AI calls run one at a time with each stage's model and effort. They drop the cli
 | Classification sends one story per call. | The 461 sample matches would take 922 calls instead of 24. Batching costs more on failure: a failed call stops the run, as any failed call does, and loses that stage's results for every story it carried, about 38 stories on average in the sample. |
 | Several AI calls run at once, in any stage: the conversations, classification, deep analysis, or the synthesis. | Batching already cuts the sample's classification to 24 calls, and Stan [judged sequential calls fast enough](https://github.com/stanislavkozlovski/hn-search/pull/6#discussion_r4376702263); running calls side by side would add coordination and reach Codex usage limits sooner. |
 
+## Pass 2: Low-level design
+
+**Review status:** Stan [requested Pass 2](https://github.com/stanislavkozlovski/hn-search/pull/6#issuecomment-6414892205). Pass 1's direction and caps stand, and the names below are final unless review changes them. These decisions are new in this pass:
+
+- A result that cites anything but a non-deleted comment from its story's archive fails its call like a schema mismatch, so the run stops. This settles the question Pass 1 left open.
+- Every Codex call selects a permission profile that denies reads outside its working folder. Pass 1's `--sandbox read-only` would switch Codex to its older sandbox settings, which [read the whole disk](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/protocol/src/protocol.rs#L1334-L1336).
+- The settings conversation offers only models whose context window the pipeline knows: `gpt-6-astra`, `gpt-6-luna`, and `gpt-6.1-sol`.
+- `--db` stays a top-level flag, where `collect` already takes it, and `--out` belongs to `research`.
+
+This pass read Codex's source at `970111f` and its docs but could not run the installed `codex`, so the canary, headroom, and Obsidian checks in the test plan are acceptance gates: a failure stops implementation for Stan's decision.
+
+## Low-level coding implementation
+
+### Existing files likely to change
+
+| File | Change |
+|---|---|
+| `hn_search/__main__.py` | On top of the archive design's `archive` subcommand, [`main()`](https://github.com/stanislavkozlovski/hn-search/blob/64703b58fedbe19ef8e80612ab1d825e880e2eaf/hn_search/__main__.py#L12-L19) makes the top-level `--db` optional and calls `parser.error()`, which exits 2, when `collect` or `archive` lacks it. It adds `research --out DIR` and imports `hn_search.research.pipeline` only in that branch. |
+| `README.md` | Documents `research`: install and login, default paths, the gate, run folders, and that a stopped run starts over. Rewrites the lines that call search and AI reports deferred. |
+| `.gitignore` | Adds `/research/`, anchored so it ignores run folders at the checkout root but not `hn_search/research/` or `docs/research/`. |
+
+`catalog.py`, `collect.py`, `clickhouse.py`, and the archive module do not change. [`test_usage_errors_exit_two_without_opening_a_catalog_or_fetching`](https://github.com/stanislavkozlovski/hn-search/blob/64703b58fedbe19ef8e80612ab1d825e880e2eaf/tests/test_collect.py#L221-L230) passes unchanged, because a bare `collect` still exits 2 without creating a file.
+
+### New files expected
+
+| New file | Responsibility |
+|---|---|
+| `hn_search/research/pipeline.py` | `main(db, out)` checks the client version, opens and migrates the catalog, and calls `run_research()`, which runs the stages in the approved order. |
+| `hn_search/research/conversation.py` | `agree_settings()` and `agree_keywords()` run the rounds and return only what Stan approved on screen. |
+| `hn_search/research/search.py` | `normalize()`, `search()`, and `gate_lines()`. |
+| `hn_search/research/threads.py` | `load_export()`, `story_prompt()`, `estimate_tokens()`, `split_story()`, `combine_verdicts()`, and `pack()`. |
+| `hn_search/research/prompts.py` | The nine templates, their `StructuredSchema`s, and their versions. |
+| `hn_search/research/ai.py` | `CONTEXT_WINDOWS`, `TIMEOUTS`, `run_options()`, and `run_stage()`, the only caller of `CodexClient.run_structured`, which also checks units and citations. |
+| `hn_search/research/store.py` | `migrate()`, run rows, reuse lookups, and one-transaction saves. |
+| `hn_search/research/render.py` | `html_to_markdown()`, `thread_md()`, `analysis_md()`, `report_md()`, and `write_atomic()`. |
+| `hn_search/research/progress.py` | `Progress`: the checklist, its ticker thread, and plain-line mode. |
+| `tests/test_research_*.py` | One test file per module above. |
+
+### Maintainability and refactor call
+
+No preparatory refactor is needed: existing modules keep their shape, and `research` lives in its own package, so `collect` never imports `stan_ai_client`. Three choke points prevent drift: `run_stage()` makes every Codex call, `html_to_markdown()` converts text for prompts and Markdown, and `store` builds every reuse key. `run_research()` takes the client, `archive_story`, input, output stream, and clock as arguments, like `collect`'s injected `opener` and `clock`. Add no ORM, async runtime, retry layer, tokenizer, or TUI framework.
+
+### Run flow
+
+1. **Start.** `main()` resolves `--db` to `hn.sqlite3` and `--out` to `research`, then exits 2 if the catalog file is missing. `pipeline.main()` exits 2 unless `importlib.metadata.version("stan-ai-client")` is `0.1.19`, runs `open_catalog()` and `store.migrate()`, and exits 2 if `<out>/run-<next id>` already exists, all before any AI call.
+2. **Conversations.** `agree_settings()` and `agree_keywords()` send each round through `run_stage()` and write nothing to SQLite.
+3. **Gate.** `search()` returns each keyword's matches, and `gate_lines()` prints the counts, top three, and work estimate. Stan's reply goes to `agree_keywords()`: an unchanged approval proceeds, and an approved change searches again.
+4. **Run row.** `store.create_run()` inserts the run and its `matched` stories and creates `<out>/run-<id>/` with `mkdir(exist_ok=False)`, all in one transaction.
+5. **Download.** For each match in ID order, `archive_story(conn, story_id, exports)` runs under `redirect_stdout()`, and its line becomes an event. `OSError`, `ValueError`, or `http.client.HTTPException` marks the story `not_downloaded` with the exception as its reason, and a `null` root in the export marks it `unavailable`. Anything else, including `sqlite3.Error` and Ctrl-C, stops the run.
+6. **Classify.** `split_story()` and `pack()` build description calls for stories without a reusable description, then verdict calls for stories without a reusable verdict. A split story gets a combining call or `combine_verdicts()`. Each relevant story gets `stories/<id>/thread.json`, copied from its export, and `thread.md`.
+7. **Analyze.** Each relevant story without a reusable analysis gets one call, or one per part plus a combining call, and then `analysis.md`.
+8. **Report.** `report_md()` writes the synthesis, thread index, and coverage to `report.md`; the run row gets `finished_at`; `research` prints the path.
+
+### Codex calls
+
+`run_options()` builds every call's options; only the working folder, model, effort, and timeout vary:
+
+```python
+CodexRunOptions(
+    cwd=empty_dir,                 # the run folder for the folder session
+    model=model, reasoning_effort=effort, timeout_seconds=TIMEOUTS[name],
+    permission_mode="default",     # no --dangerously-bypass-approvals-and-sandbox
+    skip_git_repo_check=True, ignore_user_config=True, ignore_rules=True,
+    extra_args=("--ephemeral",),
+    config_overrides=(
+        'default_permissions="hn_research"',
+        'permissions.hn_research.filesystem={":root"="deny", ":minimal"="read", '
+        '":workspace_roots"="read", ":tmpdir"="deny", ":slash_tmp"="deny"}',
+        "permissions.hn_research.network.enabled=false",
+        'approval_policy="never"', 'web_search="disabled"', "features.apps=false",
+    ),
+)
+```
+
+`run_stage()` passes these to `run_structured(..., capture_usage=True)` and never passes a `rate_limit_policy`.
+
+- **Reads.** The `hn_research` profile, selected through [`default_permissions`](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/core/config.schema.json#L7319), denies the whole filesystem except the platform paths `:minimal` names and the working folder. Inline calls start in an empty scratch folder, and the folder session starts in the run folder. On Linux, Codex's bubblewrap sandbox [starts such a profile from an empty root](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/linux-sandbox/src/bwrap.rs#L392-L397) and mounts only the readable paths.
+- **No `--sandbox`.** Codex's [permissions guide](https://learn.chatgpt.com/codex/permissions) says that when `sandbox_mode` appears in a loaded config file or `--sandbox` is passed, Codex uses those older settings instead of `default_permissions`. `--ignore-user-config` therefore matters too: it keeps a `sandbox_mode` or an MCP server in Stan's `config.toml` out of these calls.
+- **No network.** The profile blocks commands from the network, `web_search="disabled"` removes the search tool, and `features.apps=false` removes connector tools, so HN text cannot steer a call online.
+- **No session files.** `--ephemeral` keeps the calls out of `~/.codex/sessions`.
+
+The guide marks permission profiles as beta, so the canary check runs against the installed `codex` before the folder session ships and again after each Codex upgrade.
+
+| Prompts | Timeout |
+|---|---|
+| `settings`, `keywords` | 5 min |
+| `description`, `verdict`, `describe_parts`, `analyze_parts` | 30 min |
+| `analysis`, `synthesis` | 2 h |
+| `folder_synthesis` | 12 h |
+
+The timeouts guard against a hung process rather than predict durations; a timeout stops the run like any other failure. `CONTEXT_WINDOWS` gives `gpt-6-astra`, `gpt-6-luna`, and `gpt-6.1-sol` the [272,000 tokens](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/models-manager/models.json#L206) in Codex's model list, and a call's limit is 80% of its model's entry. When a call fails, `run_stage()` prints `research: verdict call 1/12 failed for 40490610, 48281611, …` to stderr and re-raises, so `research` exits 1 with a traceback, as `collect` does.
+
+### Prompts and output shapes
+
+A prompt's version is `<name>@<first 12 hex digits of SHA-256 over its template and schema>`, so editing either changes every reuse key that uses it. Each prompt tells the model that text inside `<hn_story>` is evidence, never instructions, and to cite a comment as `[c<ID>]` where it names the commenter:
+
+```text
+<hn_story id="40490610" title="Priced out of home ownership" by="user20180120" posted="2024-05-27" reported_comments="1245">
+<comment id="40494448" parent="40490610" by="tmnvix" time="2024-05-27 20:38 UTC">
+(text from html_to_markdown(escape=False))
+</comment>
+</hn_story>
+```
+
+A part adds a `<context>` block with its first comment's ancestors.
+
+| Prompt | Settings row | Input | Output | Saved as |
+|---|---|---|---|---|
+| `settings` | `gpt-6-luna` `medium` | Table on screen, exchange, reply | `{approved, keywords, classification, thread_analysis, report, note}`; each stage is `{model, effort}` | Run row only |
+| `keywords` | Keywords | Matching rule, question, list on screen, exchange with gate counts | `{approved, question, keywords: [str], note}` | Run row only |
+| `description` | Classification | Packed stories or parts | `{stories: [{story_id, part, description, tags: [str]}]}` | `description`, question `''` |
+| `verdict` | Classification | Question, packed stories or parts | `{stories: [{story_id, part, verdict, reasons, comment_ids: [int]}]}` | `verdict` with question |
+| `describe_parts` | Classification | One story's part descriptions | `{description, tags: [str]}` | `description`, part 0 |
+| `analysis` | Thread analysis | Question, one story or part | Six string lists: `arguments`, `counterarguments`, `assumptions`, `conditions`, `lived_experiences`, `unresolved_disagreements` | `analysis` with question |
+| `analyze_parts` | Thread analysis | One story's part analyses | Six string lists | `analysis`, part 0 |
+| `synthesis` | Report | Question, thread index, every analysis | Six string lists | `synthesis` with question |
+| `folder_synthesis` | Report | Question, thread index with paths and line ranges | Six string lists | Same |
+
+Every schema sets `additionalProperties: false` and requires every property, as [`validate_codex_output_schema()`](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/codex.py#L953-L973) demands. `model` is an enum of `CONTEXT_WINDOWS`, `effort` runs from `low` to `max`, which all three models support, and `verdict` is `relevant`, `uncertain`, or `irrelevant`. The pipeline enforces what a schema cannot express:
+
+- An approval counts only when the returned table, or question and list, equals the one on screen; otherwise the CLI shows the returned version.
+- The CLI shows and saves keywords in normalized form, dropping empty and duplicate ones.
+- `keywords` receives Pass 1's matching and word-form rules word for word, and `verdict` says to answer `uncertain` rather than `irrelevant` when unsure, per Pass 0's recall priority.
+- In the last five prompts, every list item contains at least one `[c<ID>]`.
+
+A verdict reply in the sample run looks like this:
+
+```json
+{"stories": [
+  {"story_id": 40490610, "part": 0, "verdict": "relevant",
+   "reasons": "Commenters argue whether cheap credit or too little building priced buyers out and compare housing stock across countries.",
+   "comment_ids": [40494448, 40494752]},
+  {"story_id": 29696653, "part": 0, "verdict": "irrelevant",
+   "reasons": "The thread is about renting cars, not homes.", "comment_ids": []}
+]}
+```
+
+`run_stage()` confirms that the reply names each unit it sent exactly once and that `40494448` and `40494752` are comments in `40490610`'s export. It then saves one `ai_results` row per story in one transaction; `40490610`'s key is `(verdict, 40490610, 0, verdict@…, gpt-6-luna, high, archive:40490610@<finished_at>, "Is buying a home better than renting?")`. That story's analysis returns items such as `"Cheap credit, not too little building, drove prices, argues [c40494448]; [c40494752] answers that rates alone don't explain the gaps between countries."`, which `analysis_md()` renders with Pass 1's `[[./thread#^c40494448|tmnvix]]` links.
+
+### Splitting and packing
+
+`estimate_tokens()` returns `ceil(len(text) / 4)` for a rendered block, and a call's room is its limit minus the estimate of its instructions and question.
+
+- `split_story()` walks top-level threads in display order. A subtree joins the open part when there is room and its parent is the story, a comment in that part, or a comment in the part's context. Otherwise, if it fits an empty part, it opens one whose context, counted in the part's size, is the subtree's ancestor chain. A subtree too large even for an empty part contributes its root comment alone, and its replies are placed the same way. The function then asserts that the parts' own comments cover every saved comment exactly once.
+- `pack()` sorts units largest first, breaking ties by story ID and part, and puts each into the first call with room, opening a call when none has any. The gate packs `descendants × 92` the same way.
+- `combine_verdicts()` applies Pass 1's rule, and a combining input over the limit marks the story `oversized`.
+
+### Rendering
+
+`html_to_markdown(html, escape)` handles HN's markup and nothing more:
+
+| HN HTML | Markdown |
+|---|---|
+| `<p>` | New paragraph, indented to the bullet's content column |
+| `<i>…</i>` | `*…*` |
+| `<pre><code>…</code></pre>` | Fenced block, with a fence one backtick longer than the longest run inside |
+| `<a href="URL">text</a>` | `[text](<URL>)`, with `<`, `>`, and spaces in the URL percent-encoded |
+| Entities such as `&#x27;` | Their characters, through `html.unescape()` |
+| Any other tag | Dropped, keeping its text |
+
+With `escape=True`, which every Markdown file uses, text outside code gets a backslash before each `\`, `` ` ``, `*`, `_`, `[`, `]`, `<`, `>`, `#`, `^`, `|`, `$`, `%`, `=`, and `~`, and before a `-`, `+`, or `1.` that starts a line. Comment text therefore cannot form a wikilink, tag, heading, block ID, comment, highlight, math, or list. AI text is escaped the same way after its `[c<ID>]` markers are cut out. Each marker then becomes `[[./thread#^c<ID>|<author>]]` in `analysis.md` or `[[./stories/<story>/thread#^c<ID>|<author>]]` in `report.md`.
+
+`thread_md()` writes Pass 1's header, a poll's options with their votes, and then one bullet per comment, indented two spaces per reply level. `^c<ID>` ends the bullet's first paragraph, which holds the author line and the comment's first paragraph, because Obsidian [reads a list item's block ID on its bullet](https://obsidian.md/help/Linking+notes+and+files/Internal+links); later paragraphs and code follow after a blank line. `report_md()` opens with the approved question as its title and one line listing the keywords and the four model settings. `write_atomic()` writes each file under a temporary name in its folder and renames it.
+
+Codex cuts each command's output to the models' 10,000-token [`truncation_policy`](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/models-manager/models.json#L15-L18) before the model [sees it](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/core/src/tools/mod.rs#L89-L101). The folder session's thread index therefore splits each `analysis.md` over 8,000 estimated tokens into line ranges under 8,000 each, and its prompt says to read those ranges.
+
+## Validation matrix
+
+`Yes` rows are implementation obligations; `No` rows record approved limitations; `Defer` rows add no implementation now.
+
+| Validation | Disposition | Behavior or consequence | Reason |
+|---|---|---|---|
+| V1 — Entry points and defaults | Yes | `research` defaults to `hn.sqlite3` and `research/`. A missing catalog, a missing or different `stan-ai-client`, or an existing `research/run-<next id>` exits 2 before any AI call, and a missing catalog is never created. `collect` and `archive` without `--db` still exit 2, and `collect` never imports the client. | Pass 1's public surface; `collect` needs no package. |
+| V2 — Conversation approval | Yes | An approval counts only when the returned table, or question and list, matches the screen; otherwise the CLI shows the returned version. Settings replies use `gpt-6-luna` at `medium`, models come from `CONTEXT_WINDOWS`, and efforts run from `low` to `max`. | Approval covers exactly what Stan saw. |
+| V3 — Matching rule | Yes | Search unescapes HTML entities, lowercases, turns each run of characters other than letters and digits into one space, and matches whole phrases in titles, URLs, and text; keywords get the same treatment. | Pass 1's search rule. |
+| V4 — Gate | Yes | Each approval searches and shows per-keyword counts, each keyword's three matches with the most reported comments, ties broken by ID, and the work estimate; nothing downloads or calls AI until Stan proceeds. | Stan's proceed-or-refine `HANDLE`. |
+| V5 — Download outcomes | Yes | Network, HTTP, and JSON errors mark a story `not downloaded` with the error; a `null` root marks it `unavailable`; SQLite errors and Ctrl-C stop the run. | Failed-download `HANDLE`; a locked catalog is not a download failure. |
+| V6 — Budget and packing | Yes | No call's estimate exceeds 80% of its model's window; units go largest first into the first call with room; a story splits only when it alone exceeds a call's room. | Stan's packing rule. |
+| V7 — Splitting and combining | Yes | Parts hold whole subtrees, open with their context, and cover each saved comment once; verdicts combine without a call; a split description or analysis gets one combining call; a combining input over the limit marks the story `oversized`; nothing is truncated. | Oversized-discussion `HANDLE`. |
+| V8 — Reply integrity and citations | Yes | A reply that misses, repeats, or adds a unit, cites anything but a non-deleted comment from that story's export, or from any relevant story's for a synthesis, or leaves a list item uncited fails its call: nothing from it is saved, and the run stops, naming the stage, stories, and ID. | Settles Pass 1's citation question; a failed call stops the run. |
+| V9 — Reuse keys | Yes | A result is reused only on an exact match of stage, story, part, prompt version, model, effort, input key, and, for verdicts, analyses, and the synthesis, question text; descriptions carry across questions, and reuse ignores which stories shared a call. | Pass 0 forbids presenting stale AI results as current. |
+| V10 — Atomic saves | Yes | Each call's rows and status changes commit in one transaction after its checks pass; a failure or Ctrl-C keeps every earlier commit. | Finished results survive a stopped run. |
+| V11 — Schema v3 migration and rollback | Yes | `migrate()` runs the archive's v2 step when `user_version` is below 2, creates the v3 tables with `IF NOT EXISTS`, and raises `user_version` to 3 without ever lowering it. Reverted code leaves the tables unused, and `collect` at `64703b5` keeps working. | Additive database changes only. |
+| V12 — Codex execution boundary | Yes | Every call uses `run_options()`: no bypass flag, the `hn_research` profile, no command network, web search, or connectors, no user config or rules, `--ephemeral`, its prompt's timeout, and no `rate_limit_policy`. | Pass 0 requires constraining the client's permissive defaults. |
+| V13 — Run-folder-only reads | Yes | The folder session cannot read a canary file beside the run folder. The installed `codex` passes this check before the folder session ships and after each Codex upgrade, or implementation stops for Stan's decision. | Pass 1 requires it, and profiles are beta. |
+| V14 — Synthesis path | Yes | Analyses whose estimate fits the report model's limit go into one call, and one token more starts the folder session; with no analyzed relevant story, no synthesis runs and `report.md` holds coverage. | Pass 1's two variants. |
+| V15 — Whole-file reads in the folder session | Yes | The thread index splits each `analysis.md` over 8,000 estimated tokens into line ranges under 8,000 each. | Codex truncates each command's output at 10,000 tokens. |
+| V16 — Rendering and links | Yes | Markdown files follow the rendering rules above, every Obsidian link starts with `./`, and coverage links to HN. | Pass 1's folder and link formats. |
+| V17 — Failure output | Yes | An AI failure prints the stage and story IDs and exits 1 with the client's typed error; nothing retries. | Stan's `IGNORE` decisions on skipping and waiting. |
+| V18 — Progress display | Yes | A terminal gets the in-place checklist with a one-second ticker that stops before each prompt; any other stdout gets one plain line per event and per story stage. | Stan's progress request. |
+| V19 — Reply headroom | Yes | The acceptance run measures `input_tokens + output_tokens` for one full-room call per inline prompt at its default effort; a total over 272,000 stops implementation for Stan's decision on the 80% budget. | Pass 1 asked for the check, and 80% is Stan's number. |
+| Served-model verification | No | Rows record the model and effort passed to `codex exec`; Codex's output names no served model, so a server-side substitution would not show. | The client's [event parser](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/codex_parser.py#L155-L183) reads a thread ID, the final message, usage, and errors, and no model. |
+| Exact token counts | No | Four characters per token is an estimate; a call it underestimates past the window fails and stops the run. | No tokenizer dependency. |
+| Resuming, skipping failed calls, and waiting out limits | No | A stopped run restarts with both conversations and reuses finished rows. | Stan's `IGNORE` decisions. |
+| Similar-question reuse | No | A reworded question reruns its verdicts and analyses. | Exact text is the approved key. |
+| Models outside `CONTEXT_WINDOWS` | No | The settings AI can choose only listed models; a new model needs a one-line code change. | The budget needs a known window. |
+| Simultaneous commands | No | Stan runs one command at a time; an overlapping writer can fail with `database is locked`. | One SQLite writer. |
+| Automatic cleanup and other Markdown viewers | No | Nothing deletes old rows or run folders; `[[…]]` links and block references work only in Obsidian. | Approved caps. |
+| Asking about uncertain stories | No | Uncertain stories appear in coverage with their reasons. | Stan's `IGNORE`. |
+| Verdict recall measurement | Defer | The acceptance run spot-checks verdicts; a labeled recall benchmark needs its own proposal. | Recall is the priority, but an evaluation set is new scope. |
+
+## Test plan
+
+### Unit tests
+
+Run `python3 -m unittest discover -s tests`. Research tests that import `stan_ai_client` skip when it is absent, so the existing suite still needs no package.
+
+- `test_research_search.py` (V3, V4): `renting` matches “super-renting” and the slug `zurich-switzerland-renting-homes`; the keyword `rent-to-own` matches “Rent to own”; `rent` matches “Rent vs. buy” and `/buy-vs-rent` but not “current,” “renting,” or “parenting”; and `don&#x27;t` matches `don t`. The gate breaks top-three ties by ID and lists every match of a keyword with fewer than three.
+- `test_research_threads.py` (V6, V7): splits at top-level threads and at nested replies, context chains, exactly-once coverage, `combine_verdicts()`, the `oversized` fallback, largest-first packing, no call over its room, and no split while a story fits a call alone.
+- `test_research_render.py` (V15, V16): one comment holding `[[x]]`, `#tag`, a leading `# `, a trailing `^c1`, `%%c%%`, `==hi==`, `$x$`, `<b>`, and a backtick run inside `<pre>`; block IDs for one-paragraph, multi-paragraph, and code-first comments; placeholders; each link form; and thread-index ranges under 8,000 tokens.
+- `test_research_ai.py` (V8, V12, V17): a recording fake client sees `run_options()` for every prompt, the run folder as the folder session's working folder, and no `rate_limit_policy`; every schema passes `validate_codex_output_schema()`; replies that miss, repeat, or add a unit, cite a foreign or deleted comment, or leave an item uncited raise before any save; and a client error prints its stage and stories.
+- `test_research_store.py` (V9–V11): real SQLite files migrate from v1 to v3 through the archive step and from v2 to v3, a second `migrate()` changes nothing, and a v4 file stays v4; a batched call saves one row per story; reuse misses when any key field changes alone, including one character of the question; and a failure between two rows of one call saves neither.
+- `test_research_progress.py` (V18): a fake terminal receives cursor-up and clear sequences, none while a prompt waits, and a pipe receives only plain lines.
+
+### Integration tests
+
+`test_research_pipeline.py` drives `__main__.main()` and `run_research()` with a fake client, a fake `archive_story`, scripted input, and a real SQLite catalog of eight posts:
+
+- “use Astra for classification and go” shows the revised table before approval, and a gate reply that changes the list searches again (V2, V4);
+- one story raises `URLError`, one has a `null` root, one splits into parts with both combining calls, and verdicts cover all three values; the folder tree, thread index, and coverage match (V5, V7, V16);
+- a second run with the same question and settings makes no story-stage calls, and its gate reports every classified story as reused (V9);
+- a run whose second verdict call fails exits 1, prints that call's stories, and keeps the first call's rows (V10, V17);
+- analyses exactly at the report limit go inline, one token more starts the folder session, and that session's answer passes the citation check (V14);
+- importing `hn_search.__main__` leaves `stan_ai_client` out of `sys.modules`, and `research` exits 2 without creating anything when `hn.sqlite3` is missing or `research/run-1` exists, as `collect` does without `--db` (V1).
+
+### End-to-end tests
+
+These acceptance runs spend real Codex usage and run before merge:
+
+1. **Canary (V13).** In a temporary folder, create `run/inside.txt` and a sibling `outside.txt`, then call `run_stage()` with the folder-session options, `run/` as the working folder, and a two-field test schema asking for both files' text. The answer must hold `inside.txt`'s text and not `outside.txt`'s.
+2. **Headroom (V19).** Send one full-room call for each inline prompt at its default effort, and record `input_tokens + output_tokens` from the captured usage.
+3. **Sample run.** Run `python3 -m hn_search research` on the real catalog with “Is buying a home better than renting?” and the four sample keywords, compare the gate with Pass 1's allowing for catalog drift, press Ctrl-C during classification, rerun to see the reuse count, and let it finish. Then open `research/` in an Obsidian vault at two depths beside a second run, and follow `[[./thread#^c…|…]]`, `[[./stories/<id>/thread#^c…|…]]`, and `[[./stories/<id>/analysis|…]]`. If a form fails, implementation stops for Stan's decision on links.
+
+Only these runs call Codex, and the suite tests no `No` or `Defer` capability.
+
+## Other considerations
+
+### Observability
+
+The checklist and the stderr failure line are the live view. Afterward, the run rows show what happened:
+
+```sql
+SELECT status, count(*) FROM research_run_stories WHERE run_id = 1 GROUP BY status;
+```
+
+`ai_results.call_usage` holds the producing call's elapsed time and token counts, repeated on every row that call produced, so real runs keep showing how close calls come to the window.
+
+### User-facing changes
+
+#### Internal API changes
+
+`main()` keeps its signature; only its parsing changes. `hn_search.research` exposes `pipeline.main()` and `run_research(conn, out_dir, *, client, archive_story, ask, stream, clock)`. The pipeline relies on three archive-design contracts: `archive_story(conn, root, export_dir)`; its export's `replies` in `kids` order, `hn_url`, status, observation interval, root record, and poll options; and a v1→v2 step that leaves any `user_version` above 2 unchanged. That design is still at Pass 1, so this implementation follows the names its Pass 2 settles.
+
+#### Public API changes
+
+**Before:** `python3 -m hn_search --db hn.sqlite3 collect` and, once the archive design lands, `archive` are the only commands; nothing searches the catalog or calls AI.
+
+**After:**
+
+```bash
+python3 -m pip install stan-ai-client==0.1.19   # once; needs a logged-in codex CLI
+python3 -m hn_search research                    # hn.sqlite3 → research/run-<id>/
+python3 -m hn_search --db ~/hn/hn.sqlite3 research --out ~/vault/hn
+```
+
+`research` exits 0 after printing `report <path>`, 1 with a traceback when an AI call or anything else fails, and 2 on a usage error: bad arguments, a missing catalog, a missing or different `stan-ai-client`, or an existing next run folder. `collect` and `archive` keep their invocations, and `collect` still needs no package. No environment variable or config file is added.
+
+### Data model changes
+
+#### Database changes
+
+`store.migrate()` runs after the archive's v2 step and, in one transaction, creates these tables and raises `user_version` to 3 if it is lower:
+
+```sql
+CREATE TABLE IF NOT EXISTS research_runs (
+  id INTEGER PRIMARY KEY,           -- folder run-<id>
+  started_at INTEGER NOT NULL,      -- UTC epoch seconds, when Stan proceeds
+  finished_at INTEGER,              -- set after report.md is written
+  folder TEXT NOT NULL UNIQUE,      -- absolute path
+  question TEXT NOT NULL,
+  keywords TEXT NOT NULL,           -- JSON list, normalized
+  settings TEXT NOT NULL            -- JSON {stage: {model, effort}}
+);
+CREATE TABLE IF NOT EXISTS research_run_stories (
+  run_id INTEGER NOT NULL,
+  story_id INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('matched', 'not_downloaded', 'unavailable',
+                                         'oversized', 'uncertain', 'irrelevant', 'relevant')),
+  reason TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (run_id, story_id)
+);
+CREATE TABLE IF NOT EXISTS ai_results (
+  id INTEGER PRIMARY KEY,
+  run_id INTEGER NOT NULL,          -- the run that produced it
+  stage TEXT NOT NULL CHECK (stage IN ('description', 'verdict', 'analysis', 'synthesis')),
+  story_id INTEGER NOT NULL,        -- 0 for the synthesis
+  part INTEGER NOT NULL,            -- 0 for a whole or combined result
+  prompt_version TEXT NOT NULL,     -- for example verdict@3f9a1c2b7d10
+  model TEXT NOT NULL,
+  effort TEXT NOT NULL,
+  input_key TEXT NOT NULL,
+  question TEXT NOT NULL,           -- '' for descriptions
+  result TEXT NOT NULL,             -- checked JSON
+  cited_ids TEXT NOT NULL,          -- JSON list
+  call_usage TEXT NOT NULL,         -- JSON: the call's elapsed_ms and token counts
+  created_at INTEGER NOT NULL,
+  UNIQUE (stage, story_id, part, prompt_version, model, effort, input_key, question)
+);
+```
+
+`input_key` is `archive:<story>@<finished_at>` for a whole story; a part appends `#` and the first 12 hex digits of a SHA-256 over its comment IDs; combining calls and the synthesis use `rows:` followed by their sorted input row IDs. A complete archive never changes, so its `finished_at` identifies the snapshot. The `UNIQUE` constraint is the reuse key, and its index serves each lookup. Stories a stopped run never reached stay `matched`. Nothing is deleted, and `user_version` never decreases.
+
+#### File system changes
+
+- `<out>/run-<id>/` holds Pass 1's tree, and `write_atomic()` writes every file in it.
+- Each run has one `TemporaryDirectory` under `$TMPDIR`, removed on exit, including after a failure. `archive_story()` writes every matched story's JSON export into its `exports/`, and its empty `cwd/` is the inline calls' working folder.
+- `.gitignore` gains `/research/`.
+- `--ephemeral` keeps Codex session files out of `~/.codex/sessions`.
+
+### Deployment
+
+Implement after the archive code lands, because `research` calls `archive_story()` and the archive's v2 step. `research` runs from the checkout and adds no service, scheduler, or environment variable. Before shipping, recheck the installed Codex's models as Pass 0 asks, update `CONTEXT_WINDOWS` and the default table to match, and pass the three acceptance checks; rerun the canary after any Codex upgrade. Rolling back to the archive code or to `64703b5` leaves the v3 tables and run folders in place and unused, while `collect` and `archive` keep working.
+
 -----------------------------------
 
 # Legend (do not delete)
