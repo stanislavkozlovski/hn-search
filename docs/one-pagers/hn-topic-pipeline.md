@@ -107,7 +107,7 @@ This design adds no daily collection schedule, external article fetching, or dis
 - Classification saves a reusable description and a verdict on the question: `relevant`, `uncertain`, or `irrelevant`. Only relevant stories get folders and deep analysis.
 - A discussion too large for one call is split into parts, analyzed part by part, and combined.
 - The synthesis writes the report's cross-thread arguments in one call when every relevant analysis fits the report model's input budget, and otherwise in one read-only Codex session that reads the story folders itself; the pipeline writes the links, thread index, and coverage either way.
-- Every AI result is saved with its inputs and reused only when all of them match.
+- Every AI result is saved with its inputs as a row in the SQLite catalog and reused only when all of them match.
 
 ### Out-of-scope non-goals
 
