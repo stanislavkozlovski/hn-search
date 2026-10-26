@@ -5,7 +5,7 @@
 ### Who is the user, what do we know about their behavior, and how correct does the result need to be?
 
 - **User:** Stan, asking “What does HN think about X?”, initially buying versus renting a home.
-- **Their behavior:** Stan asks a question in an interactive terminal, confirms or edits proposed keywords, and expects local search, downloads, classification, relevant-story folders, deep analysis, and a cited report to follow.
+- **Their behavior:** Stan asks a question in an interactive terminal, answers the AI's proposed keywords in plain language until he approves a list, and expects local search, downloads, classification, relevant-story folders, deep analysis, and a cited report to follow.
 - **Edge-case tolerance:** Prioritize relevant-thread recall over avoiding false positives, keep uncertain decisions visible, and ground arguments and quotations in identifiable archived comments rather than unsupported claims about all of HN.
 
 ### What is the prevailing user problem or opportunity?
@@ -14,24 +14,28 @@
 
 ### What is the proposed solution, and why is it right for the user?
 
-- **Solution:** Build an interactive CLI or TUI that confirms AI-generated keywords before deterministic catalog matching, archives every matching story before AI classification, saves reusable descriptions and question-specific judgments, and analyzes relevant-story folders with a frontier model at maximum supported effort to produce a cited report.
-- **Why it fits the user:** Stan controls the search terms once, receives the full research workflow, and reuses archived discussions and applicable AI work for future questions.
+- **Solution:** Build an interactive CLI or TUI in which Stan sets each AI stage's model and effort and refines AI-generated keywords in a plain-language conversation before deterministic catalog matching; it archives every matching story before AI classification, saves reusable descriptions and question-specific judgments, and analyzes relevant-story folders, by default with a frontier model at maximum supported effort, to produce a cited report.
+- **Why it fits the user:** Stan shapes the search terms by talking to the AI and approves them once, receives the full research workflow, and reuses archived discussions and applicable AI work for future questions.
 
-The approved order is **question → keyword proposal → explicit confirmation → deterministic database search → archive every matched story → classify each archived discussion → save each relevant story in its own folder → deep thread analysis → cross-thread report**.
+The approved order is **model settings → question → AI keyword proposal → Stan's plain-language replies, each read by AI as a revision or an approval → deterministic database search on the approved list → archive every matched story → classify each archived discussion → save each relevant story in its own folder → deep thread analysis → cross-thread report**.
 A saved archive or matching AI result can satisfy its stage, but title-only AI rejection must not prevent a keyword-matched story from being archived.
 The [archive design](https://github.com/stanislavkozlovski/hn-search/blob/design/hn-comment-archives/docs/one-pagers/hn-comment-archives.md) supplies reusable source snapshots and download status.
 This design owns the terminal interaction, AI stages, cache, relevant-story folders, per-thread analyses, and final report.
 
-For “buying versus renting,” Stan might confirm `buy vs rent`, `home ownership`, `mortgage`, and `renting`, or edit those terms before search.
+For “buying versus renting,” the AI might propose `buy vs rent`, `home ownership`, `mortgage`, and `renting`.
+Stan replies “these are good, but add landlord, property tax, and down payment, and more,” and the CLI shows ten terms: the original four, Stan's three, and three the AI added, such as `closing costs`.
+Every reply, approval included, goes to the AI through `CodexClient.run_structured`, which returns either a revised list for another round or an approval.
+Approval searches exactly the list on screen, so a reply that edits and approves at once, such as “add rent control and go,” shows the revised list first.
+
 The report should distinguish arguments, counterarguments, assumptions, financial or geographic conditions, lived experiences, and unresolved disagreements, with links to supporting comments and an index of every relevant thread.
 Interpret comments within their thread and reply ancestry, without cross-thread commenter profiles or claims that anecdotes establish population-wide consensus.
 
-The AI brief calls for separate versioned prompts for **keyword proposals**, **question-independent discussion descriptions/tags**, **question-specific relevance with reasons and comment IDs**, **deep per-thread arguments**, and **a cross-thread synthesis with source citations**.
+The AI brief calls for separate versioned prompts for **keyword proposals and revisions from Stan's replies**, **question-independent discussion descriptions/tags**, **question-specific relevance with reasons and comment IDs**, **deep per-thread arguments**, and **a cross-thread synthesis with source citations**.
 Later passes must specify prompt contracts, output shapes, and a worked buying-versus-renting example.
 
 ### How would you describe the end-to-end user experience?
 
-- **End-to-end user experience:** Stan asks whether buying or renting is better, confirms the suggested keywords, watches matching discussions download and receive classifications, then opens relevant-story folders and a deep report linking its claims to the original threads and comments.
+- **End-to-end user experience:** Stan keeps or changes the model settings, asks whether buying or renting is better, tells the AI how to adjust its suggested keywords until he approves them, watches matching discussions download and receive classifications, then opens relevant-story folders and a deep report linking its claims to the original threads and comments.
 
 ### What existing data, behavior, or integrations must keep working?
 
@@ -42,14 +46,16 @@ Later passes must specify prompt contracts, output shapes, and a worked buying-v
 
 Grounding on 2026-10-26 checked the installed [v0.1.19 client](https://github.com/stanislavkozlovski/stan_ai_client/tree/e423a5548292e51c5ffab1b8420a67ae38d7f4a2) and found that it runs local `codex exec` with the CLI's authentication and supports synchronous calls, explicit model/effort/timeout settings, locally schema-validated JSON, session metadata, typed failures, optional rate-limit handling, and usage normalization.
 The application owns caching, batching, scheduling, and progress; the client has no native streaming API.
+For the keyword conversation, the client can [resume one Codex session](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/codex.py#L514-L522) across replies through `CodexRunOptions.session_id`, but `run_structured` [reports that session's `thread_id`](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/codex.py#L375-L383) only when called with `capture_usage=True`.
+**Deferred — conversation state:** later passes choose between resuming that session and resending the short exchange each round.
 JSON validation does not verify truth or citations; HN text remains source evidence, not executable instructions.
 Later passes must explicitly constrain the client’s permissive default execution settings.
 
-**Proposed model settings for review:**
+**Proposed default model settings for review:** Before the first AI call, the CLI shows these four settings as defaults, and Stan keeps or changes each one (TBD: plain-language replies or a fixed `stage model effort` prompt).
 
 | AI work | Model | Reasoning effort |
 |---|---|---|
-| Keyword proposal | `gpt-6-luna` | `medium` |
+| Keyword proposals and revisions | `gpt-6-luna` | `medium` |
 | Reusable thread descriptions and topic relevance | `gpt-6-luna` | `high` |
 | Deep per-thread analysis | `gpt-6-astra` | `max` |
 | Final report synthesis | `gpt-6-astra` | `max` |
@@ -76,3 +82,4 @@ This design adds no daily collection schedule, external article fetching, or dis
 | When AI marks an archived story uncertain, Stan can see its classification but the story has no settled relevance decision. | The pipeline leaves it in the visible uncertain set outside the relevant-story analysis and names that exclusion in report coverage. | The terminal asks Stan to include or exclude uncertain stories before deep analysis and records those decisions for the report. | UNDECIDED — HANDLE / IGNORE |
 | When a matched story remains incomplete or unavailable after download, the pipeline lacks the complete discussion expected by classification. | The pipeline stops before producing the final report and retains completed work for a later resume. | The pipeline can continue with complete archives and explicitly list the omitted or incomplete stories in report coverage. | UNDECIDED — HANDLE / IGNORE |
 | When individually small [thread analyses](https://github.com/stanislavkozlovski/hn-search/blob/62ee115d5210823fc82e3723d8c8757ab74efeea/docs/one-pagers/hn-topic-pipeline.md#L20-L29) exceed the model’s input limit together, the report writer cannot finish. | Stan receives separate thread analyses without the combined report. | The report writer combines analyses in smaller groups while preserving comment links and an index of every relevant thread. | UNDECIDED — HANDLE / IGNORE |
+| When Stan's reply narrows the question itself, such as “focus on Europe,” the AI changes only the keyword list. | The classifier and report keep judging Stan's original question, so the narrower intent reaches only the search terms. | The AI also proposes a revised question for Stan to approve with the keywords, and classification and the report use that question. | UNDECIDED — HANDLE / IGNORE |
