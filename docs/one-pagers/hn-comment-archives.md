@@ -20,7 +20,7 @@
 For “buying versus renting,” the companion [topic pipeline](https://github.com/stanislavkozlovski/hn-search/blob/design/hn-topic-pipeline/docs/one-pagers/hn-topic-pipeline.md) supplies **every deterministic metadata match** to this archive before classification; an already saved snapshot satisfies the download step without another fetch.
 The archive owns source evidence and download progress; the topic pipeline owns keyword confirmation, AI decisions, relevant-story folders, and reports.
 The archive preserves the root post and comment authors within their thread context, without building cross-thread commenter profiles or fetching linked article bodies.
-Automatic refresh stays outside this design, as [previously agreed](hn-topic-research.md#agent-edge-case-scan).
+Automatic refresh stays outside this design, as [previously agreed](hn-topic-research.md#agent-edge-case-scan) and [reconfirmed](https://github.com/stanislavkozlovski/hn-search/pull/5#discussion_r4375376461) because there is no need for the complexity: once a thread older than 30 days is downloaded, it stays there.
 
 ### How would you describe the end-to-end user experience?
 
