@@ -122,10 +122,10 @@ This design adds no daily collection schedule, external article fetching, or dis
 | Risk | Growth mechanism — when it happens in practice | Explicit cap | Decision |
 |---|---|---|---|
 | AI calls multiply with matched stories. | When Stan approves the four sample keywords, [461 stories match](https://play.clickhouse.com/?user=play&query=SELECT%20count%28%29%20AS%20stories%2C%20sum%28descendants%29%20AS%20comments%2C%20countIf%28match%28t%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29buy%5B%5E0-9a-z%5D%2Bvs%5B%5E0-9a-z%5D%2Brent%28%5B%5E0-9a-z%5D%7C%24%29%27%29%29%20AS%20buy_vs_rent%2C%20countIf%28match%28t%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29home%5B%5E0-9a-z%5D%2Bownership%28%5B%5E0-9a-z%5D%7C%24%29%27%29%29%20AS%20home_ownership%2C%20countIf%28match%28t%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29mortgage%28%5B%5E0-9a-z%5D%7C%24%29%27%29%29%20AS%20mortgage%2C%20countIf%28match%28t%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29renting%28%5B%5E0-9a-z%5D%7C%24%29%27%29%29%20AS%20renting%20FROM%20%28SELECT%20lower%28concat%28title%2C%20%27%20%27%2C%20url%2C%20%27%20%27%2C%20text%29%29%20AS%20t%2C%20descendants%20FROM%20hackernews_history%20FINAL%20WHERE%20type%20IN%20%28%27story%27%2C%20%27poll%27%2C%20%27job%27%29%20AND%20parent%20%3D%200%20AND%20deleted%20%3D%200%20AND%20descendants%20%3E%3D%205%29%20WHERE%20match%28t%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29%28buy%5B%5E0-9a-z%5D%2Bvs%5B%5E0-9a-z%5D%2Brent%7Chome%5B%5E0-9a-z%5D%2Bownership%7Cmortgage%7Crenting%29%28%5B%5E0-9a-z%5D%7C%24%29%27%29%20FORMAT%20JSON) in the mirror `collect` reads, so one story per call would need 922 classification calls before any deep analysis; packing takes 24, and each relevant story still adds an analysis call. | Each story gets at most one description per archive, prompt version, model, and effort, reused across questions, plus one verdict and at most one deep analysis per approved question; description and verdict calls carry whole stories packed largest first within the input budget, and deep analysis takes one story per call; each run makes one synthesis call or one folder session; calls run one at a time and only after the gate. | CONSTRAIN |
-| Calls multiply with thread size. | When a discussion like `42057647` exceeds the input budget on its own, each part adds a call per stage, and the part results can outgrow the combining call. | A story is split only when it alone exceeds the input budget; parts hold whole reply subtrees and cover each comment once; at most one combining call for a split description or analysis, with no second merge level; part results that do not fit one call leave the story `oversized`. | CONSTRAIN |
+| Calls multiply with thread size. | When a discussion like `42057647` exceeds the input budget on its own, each part adds a call per stage. | A story is split only when it alone exceeds the input budget; parts hold whole reply subtrees and cover each comment once; parts combine without a call, so every split story finishes, and its deep analysis takes one call per part. | CONSTRAIN |
 | Folder reads and compactions multiply with relevant stories. | When a few hundred relevant analyses outgrow one call, the folder session spends a tool call on each file it reads, and each time its context reaches 90% of the window, Codex replaces earlier reads with a summary, so later arguments can rest on summaries of analyses. | One folder session per run, only when the inline input exceeds the budget; it reads only the run folder, cannot write or reach the network, and returns one schema-checked answer whose cited IDs the pipeline checks; a failed or timed-out session stops the run like any other AI call. | CONSTRAIN |
 | Saved results multiply with wording and settings. | When Stan rephrases a question or changes a model, effort, or prompt, every matched story gets a new result instead of reusing one. | Reuse requires an exact match of stage, prompt version, model, effort, archive, and, for verdicts and analyses, the approved question text; questions are never matched by similarity, and nothing is deleted automatically. | CONSTRAIN |
-| Prompts multiply with stages. | When a stage gains a variant, such as combining part results, it adds a versioned prompt, an output schema, and a reuse key for Pass 2 to specify. | Nine prompts: settings, keywords and question, description, verdict, deep analysis, synthesis, folder synthesis, description combining, and analysis combining. | CONSTRAIN |
+| Prompts multiply with stages. | When a stage gains a variant, such as combining part results, it adds a versioned prompt, an output schema, and a reuse key for Pass 2 to specify. | Seven prompts: settings, keywords and question, description, verdict, deep analysis, synthesis, and folder synthesis; part results combine without a prompt. | CONSTRAIN |
 | Output files multiply with runs. | When Stan reruns or asks a new question, each run writes another folder tree. | One folder per run, holding `report.md` and one `stories/<id>/` folder per relevant story with `thread.json`, `thread.md`, and `analysis.md`; `thread.md` converts only paragraphs, italics, code, links, and HTML entities; no HTML or PDF. | CONSTRAIN |
 
 ### Public behavior changes (before / after)
@@ -196,7 +196,7 @@ After each approval, the CLI searches and shows the gate, with no size threshold
 
 ### Progress display
 
-Stan [asked for progress like kibox's](https://github.com/stanislavkozlovski/hn-search/pull/6#discussion_r4376514177). After the gate, `research` keeps a checklist at the bottom of the terminal, one row per stage, and redraws it in place: `✓` marks a finished stage, a spinner the running one, and `·` the stages ahead. The running row shows its count and, during classification, the verdict tallies; the line under it names the call in flight, its model and effort, and the time since it started. A classification call also shows its place and size, such as `verdict call 6/12 · 38 stories`, and the count advances by that call's stories when it returns. `run_structured` blocks without streaming, so a ticker thread redraws once a second to keep the spinner and clock moving. Lines worth keeping, such as each relevant verdict, each story that did not download, and each `oversized` story, print above the checklist and scroll normally. While a conversation round or the search waits, one spinner line with a clock shows instead, and nothing redraws while Stan types.
+Stan [asked for progress like kibox's](https://github.com/stanislavkozlovski/hn-search/pull/6#discussion_r4376514177). After the gate, `research` keeps a checklist at the bottom of the terminal, one row per stage, and redraws it in place: `✓` marks a finished stage, a spinner the running one, and `·` the stages ahead. The running row shows its count and, during classification, the verdict tallies; the line under it names the call in flight, its model and effort, and the time since it started. A classification call also shows its place and size, such as `verdict call 6/12 · 38 stories`, and the count advances by that call's stories when it returns. `run_structured` blocks without streaming, so a ticker thread redraws once a second to keep the spinner and clock moving. Lines worth keeping, such as each relevant verdict and each story that did not download, print above the checklist and scroll normally. While a conversation round or the search waits, one spinner line with a clock shows instead, and nothing redraws while Stan types.
 
 The redraw uses ANSI escape codes, so `research` adds no dependency. `archive_story()` [prints its own line per story](https://github.com/stanislavkozlovski/hn-search/blob/69a87347260824bd030383fec7f00c7609106c16/docs/one-pagers/hn-comment-archives.md?plain=1#L141-L145), so the pipeline captures that line and shows it as an event instead of changing the archive. When stdout is not a terminal, nothing redraws: each event and each story's finished stage prints as one plain line. On a failure or Ctrl-C, the checklist keeps its last state and the error prints below it.
 
@@ -219,12 +219,12 @@ Every call's input budget is 80% of the stage model's context window, as Stan [s
 1. Each part takes whole top-level comment threads, a comment with all its replies, in display order. A thread too large for one part is split the same way at its replies.
 2. Each part opens with the story and the chain of parent comments above its first comment, marked as context. Every comment keeps its ancestry, and its own text appears in exactly one part.
 3. The pipeline records each part's comment IDs and checks that the parts together cover every saved comment.
-4. Verdicts combine without a call: `relevant` if any part is relevant, otherwise `uncertain` if any part is uncertain, otherwise `irrelevant`. Descriptions and deep analyses get one combining call that reads only the part results.
-5. If the part results do not fit one combining call, the story goes into coverage as `oversized`. The pipeline never truncates a discussion.
+4. Verdicts combine without a call: `relevant` if any part is relevant, otherwise `uncertain` if any part is uncertain, otherwise `irrelevant`. Descriptions and deep analyses combine without a call too: the pipeline renders the saved part results with every `[c<ID>]` citation intact, so `analysis.md` lists each part's six lists in part order.
+5. Every split story finishes, and the pipeline never truncates a discussion. The cost is that a split story's `analysis.md` can repeat an argument made in two parts; the synthesis, which reads every part's analysis, already merges arguments repeated across analyses.
 
 [85,076 comments](https://play.clickhouse.com/?user=play&query=SELECT%20count%28%29%20AS%20comments%2C%20round%28avg%28length%28text%29%29%29%20AS%20avg_chars%20FROM%20hackernews_history%20FINAL%20WHERE%20type%20%3D%20%27comment%27%20AND%20deleted%20%3D%200%20AND%20id%20BETWEEN%2042000000%20AND%2042100000%20FORMAT%20JSON) with IDs from 42,000,000 to 42,100,000 average 369 characters, roughly 92 tokens at four characters per token. At that rate, the largest buy-versus-rent match, [`40490610`](https://news.ycombinator.com/item?id=40490610) “Priced out of home ownership,” needs about 115,000 tokens for its 1,245 reported comments, about half the budget, so it is never split. [`42057647`](https://news.ycombinator.com/item?id=42057647) “Trump wins presidency for second time” needs about 855,000 tokens for 9,274 comments, so it splits into at least four parts.
 
-Stan [asked for tests](https://github.com/stanislavkozlovski/hn-search/pull/6#discussion_r4375867878). Pass 2's test plan must cover splitting at top-level and nested replies, the context chain, exactly-once coverage, both kinds of combining, and the `oversized` fallback, plus packing: largest stories first, no call over the budget, no story split while it fits a call alone, one saved result per story, and a failed call when a reply misses or repeats a story. Pass 2 also checks that a full call's reasoning and replies fit in the remaining 54,400 tokens at each stage's effort.
+Stan [asked for tests](https://github.com/stanislavkozlovski/hn-search/pull/6#discussion_r4375867878). Pass 2's test plan must cover splitting at top-level and nested replies, the context chain, exactly-once coverage, and call-free combining for verdicts, descriptions, and analyses, plus packing: largest stories first, no call over the budget, no story split while it fits a call alone, one saved result per story, and a failed call when a reply misses or repeats a story. Pass 2 also checks that a full call's reasoning and replies fit in the remaining 54,400 tokens at each stage's effort.
 
 ### Folders, analyses, and the report
 
@@ -245,7 +245,7 @@ Each relevant story's folder gets the archive's JSON export as `thread.json` and
 
 The archive design [keeps Markdown exports out of `archive`](https://github.com/stanislavkozlovski/hn-search/blob/69a87347260824bd030383fec7f00c7609106c16/docs/one-pagers/hn-comment-archives.md?plain=1#L71), so the pipeline renders `thread.md` from the archive's saved records, and `archive` does not change. HN comments carry only [paragraphs, italics, code, and links](https://news.ycombinator.com/formatdoc), so the conversion handles those four plus HTML entities; Pass 2 specifies it, including escaping comment text that Obsidian would read as a link, tag, or heading.
 
-The synthesis reads every relevant analysis and writes the cross-thread sections of `report.md`, in one call or one folder session as described below. The pipeline then appends the thread index and coverage from saved state. The index links each relevant story's title to its `analysis.md`, adds links to its `thread.md` and its HN page, and gives its description, and the synthesis cites comments the same way the analyses do. Coverage lists every other matched story under `not downloaded`, `unavailable`, `oversized`, `uncertain`, or `irrelevant`, each with its reason. Coverage entries link to HN, because those stories have no folders.
+The synthesis reads every relevant analysis and writes the cross-thread sections of `report.md`, in one call or one folder session as described below. The pipeline then appends the thread index and coverage from saved state. The index links each relevant story's title to its `analysis.md`, adds links to its `thread.md` and its HN page, and gives its description, and the synthesis cites comments the same way the analyses do. Coverage lists every other matched story under `not downloaded`, `unavailable`, `uncertain`, or `irrelevant`, each with its reason. Coverage entries link to HN, because those stories have no folders.
 
 ```markdown
 ## Arguments
@@ -330,7 +330,7 @@ This pass read Codex's source at `970111f` and its docs but could not run the in
 | `hn_search/research/conversation.py` | `agree_settings()` and `agree_keywords()` run the rounds and return only what Stan approved on screen. |
 | `hn_search/research/search.py` | `normalize()`, `search()`, and `gate_lines()`. |
 | `hn_search/research/threads.py` | `load_export()`, `story_prompt()`, `estimate_tokens()`, `split_story()`, `combine_verdicts()`, and `pack()`. |
-| `hn_search/research/prompts.py` | The nine templates, their `StructuredSchema`s, and their versions. |
+| `hn_search/research/prompts.py` | The seven templates, their `StructuredSchema`s, and their versions. |
 | `hn_search/research/ai.py` | `CONTEXT_WINDOWS`, `TIMEOUTS`, `run_options()`, and `run_stage()`, the only caller of `CodexClient.run_structured`, which also checks units and citations. |
 | `hn_search/research/store.py` | `migrate()`, run rows, reuse lookups, and one-transaction saves. |
 | `hn_search/research/render.py` | `html_to_markdown()`, `thread_md()`, `analysis_md()`, `report_md()`, and `write_atomic()`. |
@@ -348,8 +348,8 @@ No preparatory refactor is needed: existing modules keep their shape, and `resea
 3. **Gate.** `search()` returns each keyword's matches, and `gate_lines()` prints the counts, top three, and work estimate. Stan's reply goes to `agree_keywords()`: an unchanged approval proceeds, and an approved change searches again.
 4. **Run row.** `store.create_run()` inserts the run and its `matched` stories and creates `<out>/run-<id>/` with `mkdir(exist_ok=False)`, all in one transaction.
 5. **Download.** For each match in ID order, `archive_story(conn, story_id, exports)` runs under `redirect_stdout()`, and its line becomes an event. `OSError`, `ValueError`, or `http.client.HTTPException` marks the story `not_downloaded` with the exception as its reason, and a `null` root in the export marks it `unavailable`. Anything else, including `sqlite3.Error` and Ctrl-C, stops the run.
-6. **Classify.** `split_story()` and `pack()` build description calls for stories without a reusable description, then verdict calls for stories without a reusable verdict. A split story gets a combining call or `combine_verdicts()`. Each relevant story gets `stories/<id>/thread.json`, copied from its export, and `thread.md`.
-7. **Analyze.** Each relevant story without a reusable analysis gets one call, or one per part plus a combining call, and then `analysis.md`.
+6. **Classify.** `split_story()` and `pack()` build description calls for stories without a reusable description, then verdict calls for stories without a reusable verdict. A split story's verdict comes from `combine_verdicts()`, and its part descriptions combine without a call. Each relevant story gets `stories/<id>/thread.json`, copied from its export, and `thread.md`.
+7. **Analyze.** Each relevant story without a reusable analysis gets one call, or one per part, and then `analysis.md`.
 8. **Report.** `report_md()` writes the synthesis, thread index, and coverage to `report.md`; the run row gets `finished_at`; `research` prints the path.
 
 ### Codex calls
@@ -385,7 +385,7 @@ The guide marks permission profiles as beta, so the canary check runs against th
 | Prompts | Timeout |
 |---|---|
 | `settings`, `keywords` | 5 min |
-| `description`, `verdict`, `describe_parts`, `analyze_parts` | 30 min |
+| `description`, `verdict` | 30 min |
 | `analysis`, `synthesis` | 2 h |
 | `folder_synthesis` | 12 h |
 
@@ -411,9 +411,7 @@ A part adds a `<context>` block with its first comment's ancestors.
 | `keywords` | Keywords | Matching rule, question, list on screen, exchange with gate counts | `{approved, question, keywords: [str], note}` | Run row only |
 | `description` | Classification | Packed stories or parts | `{stories: [{story_id, part, description, tags: [str]}]}` | `description`, question `''` |
 | `verdict` | Classification | Question, packed stories or parts | `{stories: [{story_id, part, verdict, reasons, comment_ids: [int]}]}` | `verdict` with question |
-| `describe_parts` | Classification | One story's part descriptions | `{description, tags: [str]}` | `description`, part 0 |
 | `analysis` | Thread analysis | Question, one story or part | Six string lists: `arguments`, `counterarguments`, `assumptions`, `conditions`, `lived_experiences`, `unresolved_disagreements` | `analysis` with question |
-| `analyze_parts` | Thread analysis | One story's part analyses | Six string lists | `analysis`, part 0 |
 | `synthesis` | Report | Question, thread index, every analysis | Six string lists | `synthesis` with question |
 | `folder_synthesis` | Report | Question, thread index with paths and line ranges | Six string lists | Same |
 
@@ -422,7 +420,7 @@ Every schema sets `additionalProperties: false` and requires every property, as 
 - An approval counts only when the returned table, or question and list, equals the one on screen; otherwise the CLI shows the returned version.
 - The CLI shows and saves keywords in normalized form, dropping empty and duplicate ones.
 - `keywords` receives Pass 1's matching and word-form rules word for word, and `verdict` says to answer `uncertain` rather than `irrelevant` when unsure, per Pass 0's recall priority.
-- In the last five prompts, every list item contains at least one `[c<ID>]`.
+- In the last three prompts, every list item contains at least one `[c<ID>]`.
 
 A verdict reply in the sample run looks like this:
 
@@ -444,7 +442,7 @@ A verdict reply in the sample run looks like this:
 
 - `split_story()` walks top-level threads in display order. A subtree joins the open part when there is room and its parent is the story, a comment in that part, or a comment in the part's context. Otherwise, if it fits an empty part, it opens one whose context, counted in the part's size, is the subtree's ancestor chain. A subtree too large even for an empty part contributes its root comment alone, and its replies are placed the same way. The function then asserts that the parts' own comments cover every saved comment exactly once.
 - `pack()` sorts units largest first, breaking ties by story ID and part, and puts each into the first call with room, opening a call when none has any. The gate packs `descendants × 92` the same way.
-- `combine_verdicts()` applies Pass 1's rule, and a combining input over the limit marks the story `oversized`.
+- `combine_verdicts()` applies Pass 1's rule. `analysis_md()` lists a split story's part descriptions and part analyses in part order, and `report_md()` lists its part descriptions the same way in the thread index.
 
 ### Rendering
 
@@ -477,7 +475,7 @@ Codex cuts each command's output to the models' 10,000-token [`truncation_policy
 | V4 — Gate | Yes | Each approval searches and shows per-keyword counts, each keyword's three matches with the most reported comments, ties broken by ID, and the work estimate; nothing downloads or calls AI until Stan proceeds. | Stan's proceed-or-refine `HANDLE`. |
 | V5 — Download outcomes | Yes | Network, HTTP, and JSON errors mark a story `not downloaded` with the error; a `null` root marks it `unavailable`; SQLite errors and Ctrl-C stop the run. | Failed-download `HANDLE`; a locked catalog is not a download failure. |
 | V6 — Budget and packing | Yes | No call's estimate exceeds 80% of its model's window; units go largest first into the first call with room; a story splits only when it alone exceeds a call's room. | Stan's packing rule. |
-| V7 — Splitting and combining | Yes | Parts hold whole subtrees, open with their context, and cover each saved comment once; verdicts combine without a call; a split description or analysis gets one combining call; a combining input over the limit marks the story `oversized`; nothing is truncated. | Oversized-discussion `HANDLE`. |
+| V7 — Splitting and combining | Yes | Parts hold whole subtrees, open with their context, and cover each saved comment once; verdicts, descriptions, and analyses combine without a call, the last two rendered in part order with every citation intact; nothing is truncated. | Oversized-discussion `HANDLE`. |
 | V8 — Reply integrity and citations | Yes | A reply that misses, repeats, or adds a unit, cites anything but a non-deleted comment from that story's export, or from any relevant story's for a synthesis, or leaves a list item uncited fails its call: nothing from it is saved, and the run stops, naming the stage, stories, and ID. | Settles Pass 1's citation question; a failed call stops the run. |
 | V9 — Reuse keys | Yes | A result is reused only on an exact match of stage, story, part, prompt version, model, effort, input key, and, for verdicts, analyses, and the synthesis, question text; descriptions carry across questions, and reuse ignores which stories shared a call. | Pass 0 forbids presenting stale AI results as current. |
 | V10 — Atomic saves | Yes | Each call's rows and status changes commit in one transaction after its checks pass; a failure or Ctrl-C keeps every earlier commit. | Finished results survive a stopped run. |
@@ -507,7 +505,7 @@ Codex cuts each command's output to the models' 10,000-token [`truncation_policy
 Run `python3 -m unittest discover -s tests`. Research tests that import `stan_ai_client` skip when it is absent, so the existing suite still needs no package.
 
 - `test_research_search.py` (V3, V4): `renting` matches “super-renting” and the slug `zurich-switzerland-renting-homes`; the keyword `rent-to-own` matches “Rent to own”; `rent` matches “Rent vs. buy” and `/buy-vs-rent` but not “current,” “renting,” or “parenting”; and `don&#x27;t` matches `don t`. The gate breaks top-three ties by ID and lists every match of a keyword with fewer than three.
-- `test_research_threads.py` (V6, V7): splits at top-level threads and at nested replies, context chains, exactly-once coverage, `combine_verdicts()`, the `oversized` fallback, largest-first packing, no call over its room, and no split while a story fits a call alone.
+- `test_research_threads.py` (V6, V7): splits at top-level threads and at nested replies, context chains, exactly-once coverage, `combine_verdicts()`, largest-first packing, no call over its room, and no split while a story fits a call alone.
 - `test_research_render.py` (V15, V16): one comment holding `[[x]]`, `#tag`, a leading `# `, a trailing `^c1`, `%%c%%`, `==hi==`, `$x$`, `<b>`, and a backtick run inside `<pre>`; block IDs for one-paragraph, multi-paragraph, and code-first comments; placeholders; each link form; and thread-index ranges under 8,000 tokens.
 - `test_research_ai.py` (V8, V12, V17): a recording fake client sees `run_options()` for every prompt, the run folder as the folder session's working folder, and no `rate_limit_policy`; every schema passes `validate_codex_output_schema()`; replies that miss, repeat, or add a unit, cite a foreign or deleted comment, or leave an item uncited raise before any save; and a client error prints its stage and stories.
 - `test_research_store.py` (V9–V11): real SQLite files migrate from v1 to v3 through the archive step and from v2 to v3, a second `migrate()` changes nothing, and a v4 file stays v4; a batched call saves one row per story; reuse misses when any key field changes alone, including one character of the question; and a failure between two rows of one call saves neither.
@@ -518,7 +516,7 @@ Run `python3 -m unittest discover -s tests`. Research tests that import `stan_ai
 `test_research_pipeline.py` drives `__main__.main()` and `run_research()` with a fake client, a fake `archive_story`, scripted input, and a real SQLite catalog of eight posts:
 
 - “use Astra for classification and go” shows the revised table before approval, and a gate reply that changes the list searches again (V2, V4);
-- one story raises `URLError`, one has a `null` root, one splits into parts with both combining calls, and verdicts cover all three values; the folder tree, thread index, and coverage match (V5, V7, V16);
+- one story raises `URLError`, one has a `null` root, one splits into parts that combine without a call at every stage, and verdicts cover all three values; the folder tree, thread index, and coverage match, and the split story's `analysis.md` lists its part results in part order with every citation (V5, V7, V16);
 - a second run with the same question and settings makes no story-stage calls, and its gate reports every classified story as reused (V9);
 - a run whose second verdict call fails exits 1, prints that call's stories, and keeps the first call's rows (V10, V17);
 - analyses exactly at the report limit go inline, one token more starts the folder session, and that session's answer passes the citation check (V14);
@@ -586,7 +584,7 @@ CREATE TABLE IF NOT EXISTS research_run_stories (
   run_id INTEGER NOT NULL,
   story_id INTEGER NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('matched', 'not_downloaded', 'unavailable',
-                                         'oversized', 'uncertain', 'irrelevant', 'relevant')),
+                                         'uncertain', 'irrelevant', 'relevant')),
   reason TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (run_id, story_id)
 );
@@ -595,7 +593,7 @@ CREATE TABLE IF NOT EXISTS ai_results (
   run_id INTEGER NOT NULL,          -- the run that produced it
   stage TEXT NOT NULL CHECK (stage IN ('description', 'verdict', 'analysis', 'synthesis')),
   story_id INTEGER NOT NULL,        -- 0 for the synthesis
-  part INTEGER NOT NULL,            -- 0 for a whole or combined result
+  part INTEGER NOT NULL,            -- 0 except for a split story's parts
   prompt_version TEXT NOT NULL,     -- for example verdict@3f9a1c2b7d10
   model TEXT NOT NULL,
   effort TEXT NOT NULL,
@@ -609,7 +607,7 @@ CREATE TABLE IF NOT EXISTS ai_results (
 );
 ```
 
-`input_key` is `archive:<story>@<finished_at>` for a whole story; a part appends `#` and the first 12 hex digits of a SHA-256 over its comment IDs; combining calls and the synthesis use `rows:` followed by their sorted input row IDs. A complete archive never changes, so its `finished_at` identifies the snapshot. The `UNIQUE` constraint is the reuse key, and its index serves each lookup. Stories a stopped run never reached stay `matched`. Nothing is deleted, and `user_version` never decreases.
+`input_key` is `archive:<story>@<finished_at>` for a whole story; a part appends `#` and the first 12 hex digits of a SHA-256 over its comment IDs; the synthesis uses `rows:` followed by its sorted input row IDs. A complete archive never changes, so its `finished_at` identifies the snapshot. The `UNIQUE` constraint is the reuse key, and its index serves each lookup. Stories a stopped run never reached stay `matched`. Nothing is deleted, and `user_version` never decreases.
 
 #### File system changes
 
