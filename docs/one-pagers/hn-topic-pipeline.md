@@ -87,11 +87,155 @@ This design adds no daily collection schedule, external article fetching, or dis
 | When a matched story remains incomplete or unavailable after download, the pipeline lacks the complete discussion expected by classification. | The pipeline stops before producing the final report and retains completed work for a later resume. | The pipeline can continue with complete archives and explicitly list the omitted or incomplete stories in report coverage. | HANDLE |
 | When individually small [thread analyses](https://github.com/stanislavkozlovski/hn-search/blob/62ee115d5210823fc82e3723d8c8757ab74efeea/docs/one-pagers/hn-topic-pipeline.md#L20-L29) exceed the model’s input limit together, the report writer cannot finish. | Stan receives separate thread analyses without the combined report. | The report writer combines analyses in smaller groups while preserving comment links and an index of every relevant thread. | IGNORE |
 | When Stan's reply narrows the question itself, such as “focus on Europe,” the AI changes only the keyword list. | The classifier and report keep judging Stan's original question, so the narrower intent reaches only the search terms. | The AI also proposes a revised question for Stan to approve with the keywords, and classification and the report use that question. | HANDLE |
+| When a run stops partway, such as after a failed AI call or Ctrl-C, the pipeline keeps its finished work but has no way to continue that run. | Stan repeats both conversations in a new run, and the pipeline reuses saved results only if he approves the identical question and settings. | `research` resumes the stopped run from its saved question, keywords, settings, and matched stories, skipping both conversations and all finished work. | UNDECIDED — HANDLE / IGNORE |
+| When one story's AI call fails, such as on a timeout or on output that fails its schema, the pipeline has no result for that story's stage. | The pipeline stops the run with the client's error and keeps every finished result. | The pipeline records the failure, continues with the other stories, and lists the story in report coverage, while failures that hit every call, such as an expired Codex login, still stop the run. | UNDECIDED — HANDLE / IGNORE |
+| When Codex reports a usage limit mid-run, every remaining AI call fails until the limit resets. | The pipeline stops the run like any failed call and prints the reset time when Codex reports one. | The pipeline waits until the reported reset, printing when it will continue, and then retries the same call. | UNDECIDED — HANDLE / IGNORE |
 
 ## Pass 1: High-level design
 
+**Review status:** Stan decided the six original Pass 0 rows: oversized discussions [HANDLE](https://github.com/stanislavkozlovski/hn-search/pull/6#discussion_r4375867878), the proceed-or-refine gate [HANDLE](https://github.com/stanislavkozlovski/hn-search/pull/6#discussion_r4375871767), uncertain stories [IGNORE](https://github.com/stanislavkozlovski/hn-search/pull/6#discussion_r4375873345), failed downloads [HANDLE](https://github.com/stanislavkozlovski/hn-search/pull/6#discussion_r4375879777), analyses too large for one report call [IGNORE](https://github.com/stanislavkozlovski/hn-search/pull/6#discussion_r4375890125), and question narrowing [HANDLE](https://github.com/stanislavkozlovski/hn-search/pull/6#discussion_r4375892056). He then [requested Pass 1](https://github.com/stanislavkozlovski/hn-search/pull/6#issuecomment-6413090819). This pass adds three rows that await his decision: resuming a stopped run, skipping a failed AI call, and waiting out a Codex usage limit. Until he decides, the proposal follows their “What happens if ignored” column. Command, flag, table, and file names are proposals that Pass 2 finalizes.
+
 ## Proposal
+
+### In-scope goals
+
+- `research` runs the approved order in one terminal session and prints a line for each story at each stage.
+- Search matches each approved keyword as a whole-word phrase in catalog titles, URLs, and post text.
+- After every search, a gate shows the matches and the work ahead; nothing downloads or calls AI until Stan proceeds.
+- A keyword reply can also revise the question, and the approved question drives every later stage.
+- Downloads go through the [archive design](https://github.com/stanislavkozlovski/hn-search/blob/design/hn-comment-archives/docs/one-pagers/hn-comment-archives.md#topic-pipeline-handoff)'s `archive_story()`; a story that fails to download, or whose root HN returns as `null`, is skipped and listed in coverage.
+- Classification saves a reusable description and a verdict on the question: `relevant`, `uncertain`, or `irrelevant`. Only relevant stories get folders and deep analysis.
+- A discussion too large for one call is split into parts, analyzed part by part, and combined.
+- One synthesis call writes the report's cross-thread arguments; the pipeline writes the links, thread index, and coverage itself.
+- Every AI result is saved with its inputs and reused only when all of them match.
+
+### Out-of-scope non-goals
+
+- Combining analyses in smaller groups when they exceed one synthesis call, and asking Stan about uncertain stories, as he decided.
+- Boolean, stemmed, fuzzy, or semantic search.
+- Parallel AI calls or downloads, and settings remembered between runs.
+- Changes to `collect` or `archive`, plus Pass 0's exclusions: archive refresh, a daily schedule, article fetching, comment-only topic discovery, and commenter profiles.
+
+### Potential scope growth
+
+| Risk | Growth mechanism — when it happens in practice | Explicit cap | Decision |
+|---|---|---|---|
+| AI calls multiply with matched stories. | When Stan approves the four sample keywords, [461 stories match](https://play.clickhouse.com/?user=play&query=SELECT%20count%28%29%20AS%20stories%2C%20sum%28descendants%29%20AS%20comments%2C%20countIf%28match%28t%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29buy%5B%5E0-9a-z%5D%2Bvs%5B%5E0-9a-z%5D%2Brent%28%5B%5E0-9a-z%5D%7C%24%29%27%29%29%20AS%20buy_vs_rent%2C%20countIf%28match%28t%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29home%5B%5E0-9a-z%5D%2Bownership%28%5B%5E0-9a-z%5D%7C%24%29%27%29%29%20AS%20home_ownership%2C%20countIf%28match%28t%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29mortgage%28%5B%5E0-9a-z%5D%7C%24%29%27%29%29%20AS%20mortgage%2C%20countIf%28match%28t%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29renting%28%5B%5E0-9a-z%5D%7C%24%29%27%29%29%20AS%20renting%20FROM%20%28SELECT%20lower%28concat%28title%2C%20%27%20%27%2C%20url%2C%20%27%20%27%2C%20text%29%29%20AS%20t%2C%20descendants%20FROM%20hackernews_history%20FINAL%20WHERE%20type%20IN%20%28%27story%27%2C%20%27poll%27%2C%20%27job%27%29%20AND%20parent%20%3D%200%20AND%20deleted%20%3D%200%20AND%20descendants%20%3E%3D%205%29%20WHERE%20match%28t%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29%28buy%5B%5E0-9a-z%5D%2Bvs%5B%5E0-9a-z%5D%2Brent%7Chome%5B%5E0-9a-z%5D%2Bownership%7Cmortgage%7Crenting%29%28%5B%5E0-9a-z%5D%7C%24%29%27%29%20FORMAT%20JSON) in the mirror `collect` reads, so classification alone needs 922 calls before any deep analysis, and each relevant story adds an analysis call. | Each story gets at most one description per archive, prompt version, model, and effort, reused across questions, plus one verdict and at most one deep analysis per approved question; each run makes one synthesis call; calls run one at a time and only after the gate. | CONSTRAIN |
+| Calls multiply with thread size. | When a discussion like `42057647` outgrows one call, each part adds a call per stage, and the part results can outgrow the combining call. | Parts hold whole reply subtrees and cover each comment once; at most one combining call for a split description or analysis, with no second merge level; part results that do not fit one call leave the story `oversized`. | CONSTRAIN |
+| Saved results multiply with wording and settings. | When Stan rephrases a question or changes a model, effort, or prompt, every matched story gets a new result instead of reusing one. | Reuse requires an exact match of stage, prompt version, model, effort, archive, and, for verdicts and analyses, the approved question text; questions are never matched by similarity, and nothing is deleted automatically. | CONSTRAIN |
+| Prompts multiply with stages. | When a stage gains a variant, such as combining part results, it adds a versioned prompt, an output schema, and a reuse key for Pass 2 to specify. | Eight prompts: settings, keywords and question, description, verdict, deep analysis, synthesis, description combining, and analysis combining. | CONSTRAIN |
+| Output files multiply with runs. | When Stan reruns or asks a new question, each run writes another folder tree. | One folder per run, holding `report.md` and one `stories/<id>/` folder per relevant story with `thread.json` and `analysis.md`; no HTML or PDF. | CONSTRAIN |
+
+### Public behavior changes (before / after)
+
+- **Before:** With the archive design in place, `collect` and `archive` are the only commands; neither needs a package, and nothing searches the catalog or calls AI.
+- **After:** `collect` and `archive` behave the same and still need no package. `research` needs `stan-ai-client==0.1.19` and a logged-in `codex` CLI. If Stan keeps the defaults and approves the AI's first four keywords, a run starts like this:
+
+```text
+$ python3 -m hn_search --db hn.sqlite3 research --out research
+Model settings:
+  keywords         gpt-6-luna   medium
+  classification   gpt-6-luna   high
+  thread analysis  gpt-6-astra  max
+  report           gpt-6-astra  max
+> looks good
+Question?
+> Is buying a home better than renting?
+Question: Is buying a home better than renting?
+Keywords: buy vs rent, home ownership, mortgage, renting
+> go
+461 stories match (28,281 reported comments): buy vs rent 3 · home ownership 27 · mortgage 265 · renting 176
+Next: download 461 stories, then 922 classification calls (0 reused), one analysis per relevant story, and one report.
+Proceed, or say how to change the keywords?
+> proceed
+...
+classify 40490610 relevant "Priced out of home ownership"
+...
+report research/run-1/report.md
+```
+
+```text
+research/run-1/
+├── report.md            # synthesis, thread index, coverage
+└── stories/
+    └── 40490610/
+        ├── thread.json  # the archive's JSON export
+        └── analysis.md  # description, verdict reasons, deep analysis
+```
+
+If an AI call fails, `research` prints the story and stage, then exits 1 with the client's typed error, such as `CodexTimeoutError` or `CodexRateLimitError`; Ctrl-C also stops it. Every finished result stays saved. The three new Pass 0 rows may change this.
+
+### Conversations and the gate
+
+Each round of the settings and keyword conversations resends the short exchange so far to `CodexClient.run_structured`, so no round depends on a stored Codex session; this settles Pass 0's deferred conversation state. Settings replies always go to `gpt-6-luna` at `medium`, the keyword row's default, which settles the deferred settings-reply model.
+
+Each keyword round returns a question and a list, and the CLI shows both. If Stan replies “focus on Europe,” the question becomes “Is buying a home better than renting in Europe?” while the keywords usually stay, because a keyword can only widen the search. Approval covers the question and the list on screen, and classification, analysis, the report, and reuse all use the approved question.
+
+After each approval, the CLI searches and shows the gate, with no size threshold, because the per-keyword counts help even on small runs. Stan's reply goes to the keyword prompt: an approval proceeds, and a change shows the revised list, whose approval searches again.
+
+### Search
+
+Search lowercases text, treats each run of characters other than letters and digits as one space, and matches each keyword as a whole phrase; a story matches if any keyword does. `rent` matches “Rent vs. buy” and `/buy-vs-rent`, but not “current” or “renting,” so the keyword prompt is told to list word forms such as `rent`, `renting`, and `renters` itself. Search reads every `posts` row and adds no index. The run saves the matched IDs when Stan proceeds.
+
+### Downloads and classification
+
+The pipeline calls `archive_story()` for each matched story, so an already archived story costs no request. If the call raises, or HN returned the root as `null`, the story goes into coverage as `not downloaded` or `unavailable` with its reason, and the pipeline moves on; a later run resumes that download. If the network drops, every remaining story fails into that list.
+
+Every other archived story gets a description, saved per archive and reused across questions, and a verdict on the approved question with reasons and supporting comment IDs. The pipeline checks that every cited ID belongs to the discussion it sent; Pass 2 settles what happens to a result that cites another ID, as the [Pass 0.1 review](https://github.com/stanislavkozlovski/hn-search/pull/6#discussion_r4375494805) left it. Relevant stories get folders. Uncertain stories skip deep analysis and appear in coverage with their reasons.
 
 ### Oversized discussions
 
+Before each call, the pipeline estimates the input size. If a discussion does not fit the stage model's input budget, which Pass 2 sets below the context window, the pipeline splits it:
+
+1. Each part takes whole top-level comment threads, a comment with all its replies, in display order. A thread too large for one part is split the same way at its replies.
+2. Each part opens with the story and the chain of parent comments above its first comment, marked as context. Every comment keeps its ancestry, and its own text appears in exactly one part.
+3. The pipeline records each part's comment IDs and checks that the parts together cover every saved comment.
+4. Verdicts combine without a call: `relevant` if any part is relevant, otherwise `uncertain` if any part is uncertain, otherwise `irrelevant`. Descriptions and deep analyses get one combining call that reads only the part results.
+5. If the part results do not fit one combining call, the story goes into coverage as `oversized`. The pipeline never truncates a discussion.
+
+[85,076 comments](https://play.clickhouse.com/?user=play&query=SELECT%20count%28%29%20AS%20comments%2C%20round%28avg%28length%28text%29%29%29%20AS%20avg_chars%20FROM%20hackernews_history%20FINAL%20WHERE%20type%20%3D%20%27comment%27%20AND%20deleted%20%3D%200%20AND%20id%20BETWEEN%2042000000%20AND%2042100000%20FORMAT%20JSON) with IDs from 42,000,000 to 42,100,000 average 369 characters, roughly 92 tokens at four characters per token. At that rate, the largest buy-versus-rent match, [`40490610`](https://news.ycombinator.com/item?id=40490610) “Priced out of home ownership,” needs about 115,000 tokens for its 1,245 reported comments, under half of the [272,000-token window](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/models-manager/models.json#L34) that Codex gives `gpt-6-astra` and [`gpt-6-luna`](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/models-manager/models.json#L553) by default. [`42057647`](https://news.ycombinator.com/item?id=42057647) “Trump wins presidency for second time” needs about 855,000 tokens for 9,274 comments, so it splits into several parts.
+
 Stan [asked for tests](https://github.com/stanislavkozlovski/hn-search/pull/6#discussion_r4375867878). Pass 2's test plan must cover splitting at top-level and nested replies, the context chain, exactly-once coverage, both kinds of combining, and the `oversized` fallback.
+
+### Folders, analyses, and the report
+
+Each relevant story's folder gets the archive's JSON export as `thread.json`. Deep analysis then writes `analysis.md`: the description and verdict reasons, followed by the arguments, counterarguments, assumptions, conditions, lived experiences, and unresolved disagreements, each linked to its comments. The model returns comment IDs, and the pipeline renders them as `https://news.ycombinator.com/item?id=<id>` links.
+
+One synthesis call reads every relevant analysis and writes the cross-thread sections of `report.md`. The pipeline then appends the thread index and coverage from saved state. The index lists each relevant story's title, HN link, folder, and description. Coverage lists every other matched story under `not downloaded`, `unavailable`, `oversized`, `uncertain`, or `irrelevant`, each with its reason.
+
+When the analyses do not fit one synthesis call, `report.md` holds only the index and coverage and says that the synthesis did not fit. When no story is relevant, the pipeline skips the synthesis, and `report.md` holds only coverage.
+
+### Saved state and AI calls
+
+This design lands after the archive design, and its tables join the same `--db` file as schema v3, after the archive's v2:
+
+- A run record holds the question, keywords, settings, matched IDs, and each story's stage status.
+- An AI result record holds the stage, story, part, prompt version, model, effort, archive, the question where the stage depends on it, the result, and the cited IDs.
+
+`collect` keeps working on a v3 file, because `open_catalog()` [never overwrites a non-zero `user_version`](https://github.com/stanislavkozlovski/hn-search/blob/64703b58fedbe19ef8e80612ab1d825e880e2eaf/tests/test_catalog.py#L44-L48). Pass 2 defines the migration and rollback. `research` shares the file, so Stan runs one command at a time, as `collect` already requires.
+
+AI calls run one at a time with each stage's model and effort. They drop the client's default [`bypassPermissions` mode](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/codex.py#L152-L155) and run from an empty scratch directory with the HN text inside the prompt, so the model needs no tool, file, or network access. Pass 2 pins the Codex sandbox flags and sets per-stage timeouts in place of the client's 120-second default.
+
+## Rejected design alternatives
+
+| Alternative | Why rejected |
+|---|---|
+| Search matches keywords as substrings. | In eligible titles, [substring `renting` matches 145 stories](https://play.clickhouse.com/?user=play&query=SELECT%20countIf%28positionCaseInsensitive%28title%2C%20%27renting%27%29%20%3E%200%29%20AS%20substring_renting%2C%20countIf%28match%28lower%28title%29%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29renting%28%5B%5E0-9a-z%5D%7C%24%29%27%29%29%20AS%20word_renting%2C%20countIf%28positionCaseInsensitive%28title%2C%20%27parenting%27%29%20%3E%200%29%20AS%20parenting%2C%20countIf%28positionCaseInsensitive%28title%2C%20%27rent%27%29%20%3E%200%29%20AS%20substring_rent%2C%20countIf%28match%28lower%28title%29%2C%20%27%28%5E%7C%5B%5E0-9a-z%5D%29rent%28%5B%5E0-9a-z%5D%7C%24%29%27%29%29%20AS%20word_rent%20FROM%20hackernews_history%20FINAL%20WHERE%20type%20IN%20%28%27story%27%2C%20%27poll%27%2C%20%27job%27%29%20AND%20parent%20%3D%200%20AND%20deleted%20%3D%200%20AND%20descendants%20%3E%3D%205%20FORMAT%20JSON), 63 of them containing “parenting,” while whole-word `renting` matches 70; substring `rent` matches 5,071 stories, against 439 for the whole word. |
+| Search uses an SQLite FTS5 index with stemming. | FTS5 needs a schema migration and a full-text index over every post, and its tokenizer and stemmer decide matches that the gate's keyword list does not show. |
+| The conversations resume one Codex session through `CodexRunOptions.session_id`. | `run_structured` returns the session's `thread_id` only with `capture_usage=True`, and the session keeps hidden state in Codex's own store; resending the exchange keeps each round self-contained. |
+| `research` is a full-screen TUI. | A TUI framework would add a dependency and screen handling to a sequence of prompts and progress lines. |
+| The synthesis model writes the thread index and coverage. | The model could drop or miscount threads; the pipeline writes both from saved state, so every relevant thread and every omission appears. |
+| Several AI calls run at once. | Parallel calls would shorten runs but add coordination and reach Codex usage limits sooner. |
+
+-----------------------------------
+
+# Legend (do not delete)
+
+Scope growth labels mean:
+
+- **INCLUDE** accepts the resulting scope;
+- **CONSTRAIN** limits the behavior that causes it;
+- **EXCLUDE** leaves the broader work outside this proposal.
+
+Each label is valid only when its row also names the repeatable growth
+mechanism and a finite, observable cap.
