@@ -1,5 +1,11 @@
 # hn-search
 
+- **Old posts:** `collect` saves metadata for nondeleted top-level HN posts with at least five reported comments from ClickHouse into SQLite, resuming interrupted imports.
+- **New posts:** Each run then rescans posts created in the preceding five days, adds newly eligible posts, and refreshes eligible saved metadata. Posts that stop qualifying keep their last eligible snapshot; there is no catch-up outside that window.
+- **Use:** Build a local catalog and inspect collection progress now; topic searches, comment downloads, and AI reports with linked arguments come later, as described in the [one-pager](docs/one-pagers/hn-topic-research.md).
+
+## Usage and collection details
+
 Collect a local SQLite catalog of Hacker News post metadata from ClickHouse's
 [`hackernews_history` mirror](https://play.clickhouse.com/). This implements the
 [metadata collection design](https://github.com/stanislavkozlovski/hn-search/pull/1).
