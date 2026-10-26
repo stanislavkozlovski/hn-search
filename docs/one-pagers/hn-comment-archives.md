@@ -29,7 +29,7 @@ Automatic refresh stays outside this design, as [previously agreed](hn-topic-res
 ### What existing data, behavior, or integrations must keep working?
 
 - **Legacy data:** Preserve schema-v1 `posts`, the historical `collection_progress` checkpoint, and all previously collected metadata while adding archive storage.
-- **Legacy behavior:** Keep `python3 -m hn_search --db hn.sqlite3 collect` and its five-comment admission, historical resume, five-day refresh, and retained snapshots unchanged.
+- **Legacy behavior:** Keep `python3 -m hn_search --db hn.sqlite3 collect`, its explicit `--db` requirement, and its five-comment admission, historical resume, five-day refresh, and retained snapshots unchanged.
 - **Existing integrations:** Use the official HN item API for roots and replies and provide archived discussions to the companion topic pipeline; this downloader requires no AI client or model.
 - **Compatibility tolerance:** Additive database changes are acceptable, existing collected data must survive, and interrupted archive work must remain resumable.
 
@@ -57,7 +57,7 @@ Puerto's local `comment_processor/comment_export.py` and `ARCHITECTURE.md` provi
 
 ### In-scope goals
 
-- `archive` downloads requested catalog stories and their reply trees from the official HN item API into the `--db` file and writes one JSON file and one Markdown file per complete story.
+- `archive` downloads requested catalog stories and their reply trees from the official HN item API into the selected SQLite catalog and writes one JSON file and one Markdown file per complete story to the selected export directory.
 - Each fetched item is saved unchanged with its retrieval time; `kids` order defines the reply tree, and deleted, dead, and unavailable items stay visible as such.
 - A story stays `incomplete` until nothing is pending, then becomes `complete`; reruns resume incomplete stories without refetching saved items and reuse complete ones with zero requests.
 - A poll also saves each option's text and vote count, as Stan [decided](https://github.com/stanislavkozlovski/hn-search/pull/5#discussion_r4375390350).
@@ -83,21 +83,29 @@ Puerto's local `comment_processor/comment_export.py` and `ARCHITECTURE.md` provi
 ### Public behavior changes (before / after)
 
 - **Before:** `python3 -m hn_search --db hn.sqlite3 collect` is the only command, and the file holds schema-v1 metadata with no comments.
-- **After:** `collect` behaves the same. Stan archives catalog stories by ID and sees one line per story:
+- **After:** `collect` behaves the same and still requires explicit `--db`, as [PR #6 preserves](https://github.com/stanislavkozlovski/hn-search/blob/c3963bb752d278052beacd2a4b9dd654cc57fb85/docs/one-pagers/hn-topic-pipeline.md#L131-L134). `archive` defaults to `hn.sqlite3` for the catalog and `exports/` for exports, both relative to the current working directory; explicit `--db` and `--export-dir` override the corresponding paths. Stan archives catalog stories by ID and sees one line per story:
 
 ```bash
-python3 -m hn_search --db hn.sqlite3 archive --export-dir exports 4517440
+python3 -m hn_search archive 4517440
 ```
 
 ```text
 archive root=4517440 status=complete comments=5 unavailable=0 reported_descendants=5 json=exports/4517440.json markdown=exports/4517440.md
 ```
 
-Rerunning the command sends no request, rebuilds both exports from SQLite, and prints the same line with `reused=true`. Requesting `99999999`, which has no `posts` row, prints `error: 99999999 is not in the catalog; archive accepts only catalog stories` and sends no request. Exact flag names belong to Pass 2.
+The equivalent invocation with both paths explicit is:
+
+```bash
+python3 -m hn_search --db hn.sqlite3 archive --export-dir exports 4517440
+```
+
+Rerunning the command sends no request, rebuilds both exports from SQLite, and prints the same line with `reused=true`. Requesting `99999999`, which has no `posts` row, prints `error: 99999999 is not in the catalog; archive accepts only catalog stories` and sends no request.
+
+**Deferred to Pass 2:** Implement the parser changes in `hn_search/__main__.py`; the archive defaults and override flags above are settled.
 
 ### Archive record and compatibility
 
-Archive data lives in the catalog's `--db` file. `archives` holds one row per root with `status` (`incomplete` or `complete`), `started_at`, and `finished_at`. `archive_items` holds one row per fetched ID with its root, the API's JSON object unchanged (or `null`), and `retrieved_at`. Exports use this saved root, not the `posts` row that `collect` may later refresh.
+Archive data lives in the selected catalog: `hn.sqlite3` in the current working directory unless `--db` supplies another path. Exports go to `exports/` in the current working directory unless `--export-dir` supplies another path. `archives` holds one row per root with `status` (`incomplete` or `complete`), `started_at`, and `finished_at`. `archive_items` holds one row per fetched ID with its root, the API's JSON object unchanged (or `null`), and `retrieved_at`. Exports use this saved root, not the `posts` row that `collect` may later refresh.
 
 Only a `complete` story gets exports. The JSON nests `replies` in `kids` order, adds each item's `hn_url`, and reports the status, observation interval, saved and unavailable counts, and HN's reported `descendants` without treating a mismatch as failure. Both exports list a poll's options in `parts` order with text and vote `score`; option `126810` of poll `126809` reads "Users would create too many, and new arrivals would think News.YC was a poll site." with 73 votes.
 
@@ -178,7 +186,7 @@ A first run sends six requests, for `4517440`, `4517521`, `4520037`, `4517587`, 
 
 ### Topic pipeline handoff
 
-The topic pipeline calls `archive_story()` for each matched catalog ID after keyword confirmation; a `complete` story costs no request. `archive_story()` raises on the first failed request, and the pipeline's own design decides whether to stop or continue with other stories. The Markdown export uses the pipeline's `thread.md` layout and `^c<ID>` anchors; the pipeline continues to own story-folder names and links from analyses and reports. The archive adds no AI client, model setting, or relevance state.
+The topic pipeline calls `archive_story(conn, root, export_dir)` for each matched catalog ID after keyword confirmation; a `complete` story costs no request. Defaults apply only to the `archive` CLI; callers of `archive()` and `archive_story()` supply the connection and export directory explicitly. `archive_story()` raises on the first failed request, and the pipeline's own design decides whether to stop or continue with other stories. The Markdown export uses the pipeline's `thread.md` layout and `^c<ID>` anchors; the pipeline continues to own story-folder names and links from analyses and reports. The archive adds no AI client, model setting, or relevance state.
 
 ## Rejected design alternatives
 
