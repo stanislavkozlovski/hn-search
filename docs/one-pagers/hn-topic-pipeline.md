@@ -263,12 +263,24 @@ When no story is relevant, the pipeline skips the synthesis, and `report.md` hol
 
 ### Saved state and AI calls
 
-This design lands after the archive design, and its tables join the same `--db` file as schema v3, after the archive's v2:
+Everything a run saves goes into tables in the catalog's SQLite database, `hn.sqlite3` unless `--db` names another, the same file `collect` fills. This design adds two kinds of rows:
 
-- A run record holds the question, keywords, settings, matched IDs, and each story's stage status.
-- An AI result record holds the stage, story, part, prompt version, model, effort, archive, the question where the stage depends on it, the result, and the cited IDs.
+- Run rows hold each run's question, keywords, settings, matched IDs, and each story's stage status.
+- AI result rows hold the stage, story, part, prompt version, model, effort, archive, the question where the stage depends on it, the result, and the cited IDs.
 
-`collect` keeps working on a v3 file, because `open_catalog()` [never overwrites a non-zero `user_version`](https://github.com/stanislavkozlovski/hn-search/blob/64703b58fedbe19ef8e80612ab1d825e880e2eaf/tests/test_catalog.py#L44-L48). Pass 2 defines the migration and rollback. `research` shares the file, so Stan runs one command at a time, as `collect` already requires.
+Every AI result, from one part's verdict to the synthesis, is a row there. The files in a run folder are rendered from those rows and the archive's tables, so deleting a run folder loses no saved result.
+
+The database records which tables it has in SQLite's [`user_version`](https://www.sqlite.org/pragma.html#pragma_user_version), an integer in the file header that SQLite stores but never uses itself. These designs use it as the schema version, and each design that adds tables raises it by one:
+
+| `user_version` | Tables it adds | Defined in | State |
+|---|---|---|---|
+| 1 | `posts`, `collection_progress` | The [metadata design](https://github.com/stanislavkozlovski/hn-search/blob/64703b58fedbe19ef8e80612ab1d825e880e2eaf/docs/one-pagers/hn-topic-research.md?plain=1#L298) ([#1](https://github.com/stanislavkozlovski/hn-search/pull/1)), built as [`open_catalog()`](https://github.com/stanislavkozlovski/hn-search/blob/64703b58fedbe19ef8e80612ab1d825e880e2eaf/hn_search/catalog.py#L6-L31) in `hn_search/catalog.py` | Merged in [#4](https://github.com/stanislavkozlovski/hn-search/pull/4); the existing catalog is v1 |
+| 2 | `archives`, `archive_items` | The [archive design](https://github.com/stanislavkozlovski/hn-search/blob/69a87347260824bd030383fec7f00c7609106c16/docs/one-pagers/hn-comment-archives.md?plain=1#L100-L104) ([#5](https://github.com/stanislavkozlovski/hn-search/pull/5)) | Designed, not built |
+| 3 | The run and AI result tables above | This design; Pass 2 names the tables | Proposed here; lands after the archive design |
+
+`open_catalog()` [writes 1 only when it reads 0](https://github.com/stanislavkozlovski/hn-search/blob/64703b58fedbe19ef8e80612ab1d825e880e2eaf/hn_search/catalog.py#L26-L27), so a new file becomes v1 and a higher value is never overwritten. The first `archive` run moves a database from 1 to 2, and the first `research` run moves it to 3; `research` calls `archive_story()`, so on a database that `archive` never touched it applies the archive's step first. Rolling back to `64703b5` keeps `collect` working on a v2 or v3 database, as [`test_existing_nonzero_schema_version_is_never_overwritten`](https://github.com/stanislavkozlovski/hn-search/blob/64703b58fedbe19ef8e80612ab1d825e880e2eaf/tests/test_catalog.py#L44-L48) checks, and the newer tables sit unused. Pass 2 defines the migration and rollback.
+
+`research`, `archive`, and `collect` share this one database, and SQLite lets one connection write at a time, so Stan runs one command at a time, as `collect` already requires: an overlapping writer [fails with `database is locked`](https://github.com/stanislavkozlovski/hn-search/blob/64703b58fedbe19ef8e80612ab1d825e880e2eaf/README.md?plain=1#L54-L56) after a five-second wait.
 
 AI calls run one at a time with each stage's model and effort. They drop the client's default [`bypassPermissions` mode](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/codex.py#L152-L155) and run from an empty scratch directory with the HN text inside the prompt, so the model needs no tool, file, or network access. The folder session is the one exception, because it reads files in the run folder. Codex's read-only sandbox blocks writes and network but [can read the whole disk](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/protocol/src/protocol.rs#L1334-L1336), and the analyses quote HN text that could tell the model to open other files, so the session must read nothing outside the run folder. Codex [has read-deny rules](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/protocol/src/permissions.rs#L315-L321) for this; Pass 2 confirms that the installed `codex` enforces a run-folder-only read rule and stops for Stan's decision if it cannot. They pass no `rate_limit_policy` to `run_structured`, so on a usage limit it [raises `CodexRateLimitError` at once](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/_retry.py#L30-L31) instead of sleeping until the reset, and `research` retries no failed call. Pass 2 pins the Codex sandbox flags and sets per-stage timeouts in place of the client's 120-second default.
 
