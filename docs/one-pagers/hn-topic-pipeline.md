@@ -14,10 +14,10 @@
 
 ### What is the proposed solution, and why is it right for the user?
 
-- **Solution:** Build an interactive CLI or TUI in which Stan sets each AI stage's model and effort and refines AI-generated keywords in a plain-language conversation before deterministic catalog matching; it archives every matching story before AI classification, saves reusable descriptions and question-specific judgments, and analyzes relevant-story folders, by default with a frontier model at maximum supported effort, to produce a cited report.
+- **Solution:** Build an interactive CLI or TUI in which Stan sets each AI stage's model and effort and refines AI-generated keywords through plain-language conversations before deterministic catalog matching; it archives every matching story before AI classification, saves reusable descriptions and question-specific judgments, and analyzes relevant-story folders, by default with a frontier model at maximum supported effort, to produce a cited report.
 - **Why it fits the user:** Stan shapes the search terms by talking to the AI and approves them once, receives the full research workflow, and reuses archived discussions and applicable AI work for future questions.
 
-The approved order is **model settings → question → AI keyword proposal → Stan's plain-language replies, each read by AI as a revision or an approval → deterministic database search on the approved list → archive every matched story → classify each archived discussion → save each relevant story in its own folder → deep thread analysis → cross-thread report**.
+The approved order is **default model settings → Stan's plain-language setting replies, each read by AI as a revision or an approval → question → AI keyword proposal → Stan's plain-language keyword replies, read the same way → deterministic database search on the approved list → archive every matched story → classify each archived discussion → save each relevant story in its own folder → deep thread analysis → cross-thread report**.
 A saved archive or matching AI result can satisfy its stage, but title-only AI rejection must not prevent a keyword-matched story from being archived.
 The [archive design](https://github.com/stanislavkozlovski/hn-search/blob/design/hn-comment-archives/docs/one-pagers/hn-comment-archives.md) supplies reusable source snapshots and download status.
 This design owns the terminal interaction, AI stages, cache, relevant-story folders, per-thread analyses, and final report.
@@ -30,12 +30,12 @@ Approval searches exactly the list on screen, so a reply that edits and approves
 The report should distinguish arguments, counterarguments, assumptions, financial or geographic conditions, lived experiences, and unresolved disagreements, with links to supporting comments and an index of every relevant thread.
 Interpret comments within their thread and reply ancestry, without cross-thread commenter profiles or claims that anecdotes establish population-wide consensus.
 
-The AI brief calls for separate versioned prompts for **keyword proposals and revisions from Stan's replies**, **question-independent discussion descriptions/tags**, **question-specific relevance with reasons and comment IDs**, **deep per-thread arguments**, and **a cross-thread synthesis with source citations**.
+The AI brief calls for separate versioned prompts for **model-setting revisions from Stan's replies**, **keyword proposals and revisions from Stan's replies**, **question-independent discussion descriptions/tags**, **question-specific relevance with reasons and comment IDs**, **deep per-thread arguments**, and **a cross-thread synthesis with source citations**.
 Later passes must specify prompt contracts, output shapes, and a worked buying-versus-renting example.
 
 ### How would you describe the end-to-end user experience?
 
-- **End-to-end user experience:** Stan keeps or changes the model settings, asks whether buying or renting is better, tells the AI how to adjust its suggested keywords until he approves them, watches matching discussions download and receive classifications, then opens relevant-story folders and a deep report linking its claims to the original threads and comments.
+- **End-to-end user experience:** Stan keeps or changes the model settings in plain language, asks whether buying or renting is better, tells the AI how to adjust its suggested keywords until he approves them, watches matching discussions download and receive classifications, then opens relevant-story folders and a deep report linking its claims to the original threads and comments.
 
 ### What existing data, behavior, or integrations must keep working?
 
@@ -46,12 +46,12 @@ Later passes must specify prompt contracts, output shapes, and a worked buying-v
 
 Grounding on 2026-10-26 checked the installed [v0.1.19 client](https://github.com/stanislavkozlovski/stan_ai_client/tree/e423a5548292e51c5ffab1b8420a67ae38d7f4a2) and found that it runs local `codex exec` with the CLI's authentication and supports synchronous calls, explicit model/effort/timeout settings, locally schema-validated JSON, session metadata, typed failures, optional rate-limit handling, and usage normalization.
 The application owns caching, batching, scheduling, and progress; the client has no native streaming API.
-For the keyword conversation, the client can [resume one Codex session](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/codex.py#L514-L522) across replies through `CodexRunOptions.session_id`, but `run_structured` [reports that session's `thread_id`](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/codex.py#L375-L383) only when called with `capture_usage=True`.
+For the settings and keyword conversations, the client can [resume a Codex session](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/codex.py#L514-L522) across replies through `CodexRunOptions.session_id`, but `run_structured` [reports that session's `thread_id`](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/codex.py#L375-L383) only when called with `capture_usage=True`.
 **Deferred — conversation state:** later passes choose between resuming that session and resending the short exchange each round.
 JSON validation does not verify truth or citations; HN text remains source evidence, not executable instructions.
 Later passes must explicitly constrain the client’s permissive default execution settings.
 
-**Proposed default model settings for review:** Before the first AI call, the CLI shows these four settings as defaults, and Stan keeps or changes each one (TBD: plain-language replies or a fixed `stage model effort` prompt).
+**Proposed default model settings for review:** When a run starts, the CLI shows these four defaults, and Stan keeps or changes them in plain language, as he does for keywords.
 
 | AI work | Model | Reasoning effort |
 |---|---|---|
@@ -60,8 +60,12 @@ Later passes must explicitly constrain the client’s permissive default executi
 | Deep per-thread analysis | `gpt-6-astra` | `max` |
 | Final report synthesis | `gpt-6-astra` | `max` |
 
+Stan replies “use Astra at high effort for classification,” and the CLI shows the table with the “Reusable thread descriptions and topic relevance” row changed to `gpt-6-astra` at `high`; “looks good” then approves it.
+As in the keyword conversation, every reply, approval included, goes through `CodexClient.run_structured`, which returns either a revised table or an approval, and approval uses exactly the table on screen, so “use Astra for classification and go” shows the revised table first.
+**Deferred — settings-reply model:** later passes choose which model and effort read these replies, which run before Stan approves any setting; left unset, `CodexClient` [falls back to `gpt-6.1-sol` at `max`](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/codex.py#L152-L153).
+
 The local `/home/ops/.codex/models_cache.json` checked that day advertises Astra as a frontier model; recheck available frontier choices at implementation, record the actual model used, and expose any substitution.
-The [installed client declares](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/types.py#L7) `max` as its highest supported reasoning effort; do not assume the underlying CLI's `ultra` option is a supported client contract.
+The [installed client declares](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/types.py#L8) `max` as its highest supported reasoning effort; do not assume the underlying CLI's `ultra` option is a supported client contract.
 
 Persist the question and approved keywords, the source snapshot used, prompt text/version, model and effort, structured result, explanation, cited IDs, and completion state so a future search can establish which work is reusable.
 A question-independent description can help a differently worded search, but “irrelevant to buying versus renting” must never become “irrelevant to mortgage rates”; reuse a final judgment only when its actual question and other inputs still match.
