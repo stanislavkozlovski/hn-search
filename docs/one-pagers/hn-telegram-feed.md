@@ -205,7 +205,7 @@ Stories:
 The model replies in this shape:
 
 ```json
-{"stories": [{"id": 50234108, "categories": ["ai-agents/agents"]}]}
+{"50234108": ["ai-agents/agents"]}
 ```
 
 ### Delivery and retries
@@ -347,7 +347,16 @@ It rejects unknown keys (a `min_points` key fails with its name), lens or catego
 
 `batches_to_judge()` selects stories from this run's search, in HN ID order, that an eligible lens has no current decision for. A lens is eligible when the story's `first_seen_at` is at or after the lens's `added_at`. A decision is current while its saved `title`, `url`, and `categories_digest` match; points, model, effort, and prompt are never compared. Each batch holds up to 20 stories and lists the categories of every lens that needs any of them, and `save_decisions()` stores only the needed (lens, story) pairs, `[]` included.
 
-`PROMPT` is Pass 1's prompt verbatim; `classify_batch()` fills one `- lens/category: description` line per listed category and the stories as `json.dumps(..., ensure_ascii=False)`. It makes one `run_structured()` call whose schema has the shape `{"stories": [{"id": <batch ID enum>, "categories": [<listed category ID enum>]}]}`, so `run_structured()` rejects any other ID. It then requires each batch ID exactly once, which the Codex schema subset cannot express because it rejects `uniqueItems`. Any failure raises before `save_decisions()`.
+`PROMPT` is Pass 1's prompt verbatim; `classify_batch()` fills one `- lens/category: description` line per listed category and the stories as `json.dumps(..., ensure_ascii=False)`. It makes one `run_structured()` call with a per-batch schema keyed by story ID: one required property per batch story ID, `additionalProperties: false`, and each value an array whose items `$ref` a single `$defs` enum of the listed category IDs. For Pass 1's example batch:
+
+```json
+{"type": "object",
+ "properties": {"50234108": {"type": "array", "items": {"$ref": "#/$defs/category"}}},
+ "required": ["50234108"], "additionalProperties": false,
+ "$defs": {"category": {"type": "string", "enum": ["ai-agents/agents", "ai-agents/evals"]}}}
+```
+
+The Codex schema subset already requires every object schema to list each property in `required` and to set `additionalProperties: false` ([`validate_codex_output_schema()`](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/codex.py#L1020-L1041)), and `run_structured()` then checks the reply locally with [`Draft202012Validator`](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/src/stan_ai_client/schema.py#L41-L46). A missing or unknown story or an unknown category fails that check, and a parsed JSON object holds each story once, so `classify_batch()` adds no exactly-once check of its own. Any failure raises before `save_decisions()`, which runs only after the check passes.
 
 `feed_command()` builds `CodexClient(default_model=settings.model, default_reasoning_effort=settings.effort, default_permission_mode="default", default_timeout_seconds=300)`, and each call passes a fresh empty temporary directory to `classifier_options()`:
 
@@ -447,7 +456,7 @@ While a run is active, systemd starts no second one, so timer runs never overlap
 | V6 — Decision reuse | Yes | A decision is reused until the story's title or URL or the lens's `categories_digest` changes; points, model, effort, and prompt changes reuse it; stories outside the current search get no call. | Pass 1's re-judgment cap. |
 | V7 — Batching | Yes | Each call carries at most 20 stories, each story joins at most one call per run, and only needed (lens, story) decisions are saved, `[]` included. | Pass 1's model-call cap. |
 | V8 — Classifier isolation | Yes | Every call uses the exact argv above, a new empty working directory, and stdin for the prompt, and it never resumes a session; the prompt carries only story IDs, titles, URLs, and categories. | Pass 1's classifier-access cap. |
-| V9 — Reply validation | Yes | A reply with an unknown story or category ID fails `run_structured()`'s schema check, and a missing or repeated story fails the exactly-once check; either way, the batch saves nothing and the run exits 1. | An injected title must not create decisions outside its batch. |
+| V9 — Reply validation | Yes | A reply with an unknown or missing story, or an unknown category, fails `run_structured()`'s schema check, so the batch saves nothing and the run exits 1. | An injected title must not create decisions outside its batch. |
 | V10 — Classifier failure | Yes | A process error, 300-second timeout, usage limit, or invalid reply stops further calls, leaves those stories unjudged, still runs sends and edits, and exits 1 without a heartbeat; no `RateLimitRetryPolicy` waits. | Pass 1's failure path; more calls in the same hour mostly repeat the failure. |
 | V11 — Pending sends | Yes | A match is sent while its story is in this run's search, its current decision has categories, and its lens has no line for it; each run tries it once. After the story leaves the search it is never sent, and a re-judgment to `[]` cancels it. | Pass 1's retry cap, derived without a pending table. |
 | V12 — Message text and length | Yes | HTML parse mode escapes `<`, `>`, and `&` in titles and URLs and strikes old values with `<s>`; `pack()` keeps each message's ten-value worst case within 4,096 UTF-16 code units, so no send or edit exceeds the limit. | Titles are attacker-controlled, and Pass 1 promised edits within the limit. |
@@ -471,7 +480,7 @@ Install `requirements.txt`, then run `python3 -m unittest discover -s tests` for
 
 - `test_feed_lenses.py` (V2): a description edit changes `categories_digest` while reordering does not; `min_points` fails naming the key; a missing token names its variable and no value.
 - `test_feed_algolia.py` (V3): through `RecordingOpener`, checks the exact query string, the 30-second timeout, hit `50237680` without `url`, `nbHits = 1001` with 1,000 hits, repeated IDs, and `points = 4`.
-- `test_feed_classify.py` (V6–V10): with the fake `codex` on `PATH`, checks the exact argv above, a 21-story window split 20 + 1, a title containing `"}]` staying inside its JSON string, unknown, missing, or repeated IDs saving nothing, and a retitle or description edit re-judging while a points change or model switch does not.
+- `test_feed_classify.py` (V6–V10): with the fake `codex` on `PATH`, checks the exact argv above, a 21-story window split 20 + 1, a title containing `"}]` staying inside its JSON string, a reply with an unknown or missing story or an unknown category failing `run_structured()`'s schema check so the batch saves nothing and the run exits 1, and a retitle or description edit re-judging while a points change or model switch does not.
 - `test_feed_telegram.py` (V12, V14, V16): `C++ <templates> & you 🙂` renders as `C++ &lt;templates&gt; &amp; you 🙂` with the emoji counted as two units; 40 maximum-length lines split into messages whose ten-value renders stay within 4,096; `message is not modified` succeeds; a 403's error text omits the token.
 
 ### Integration tests
