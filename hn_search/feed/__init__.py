@@ -2,6 +2,9 @@
 
 from dataclasses import dataclass, field
 
+# A line shows at most this many point values, and pack() reserves room for all of them.
+MAX_SHOWN_POINTS = 10
+
 
 @dataclass(frozen=True)
 class Story:

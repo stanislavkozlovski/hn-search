@@ -30,7 +30,7 @@ def run_feed(conn, settings, client, *, opener, clock):
         store.save_decisions(conn, decisions, now)
         _log("classify", settings, batch=f"{number}/{len(batches)}", stories=len(batch.stories),
              lenses=len(batch.lenses), matched=sum(bool(decision.categories) for decision in decisions))
-    for message in telegram.pack(store.pending_lines(conn, settings, stories)):
+    for message in telegram.pack(store.pending_lines(conn, settings.lenses, stories)):
         try:
             message_id = telegram.send_message(message, settings.tokens, opener=opener)
         except telegram.TelegramError as error:
@@ -41,7 +41,7 @@ def run_feed(conn, settings, client, *, opener, clock):
         sends += 1
         _log("send", settings, lens=",".join(dict.fromkeys(line.lens for line in message.lines)),
              chat=message.chat_id, lines=len(message.lines), message_id=message_id)
-    for message in store.messages_to_edit(conn, settings, stories):
+    for message in store.messages_to_edit(conn, settings.lenses, stories):
         try:
             telegram.edit_message(message, settings.tokens, opener=opener)
         except telegram.TelegramError as error:

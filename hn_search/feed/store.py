@@ -1,9 +1,9 @@
-"""Feed schema and short transactions; no writes to the research catalog."""
+"""Feed schema and short transactions; no research-catalog writes or bot tokens."""
 
 import json
 import sqlite3
 
-from hn_search.feed import Batch, Line, Message
+from hn_search.feed import MAX_SHOWN_POINTS, Batch, Line, Message
 
 APPLICATION_ID = 0x484E4644
 SCHEMA_VERSION = 1
@@ -79,11 +79,12 @@ def save_window(conn, lenses, stories, now):
     return new
 
 
-def _current(decision, lens, story):
-    return decision is not None and (
-        decision["title"] == story.title and decision["url"] == story.url
-        and decision["categories_digest"] == lens.categories_digest
-    )
+def _current_tags(conn, lens, story):
+    """Return the saved tags if the lens judged this title, URL, and categories; otherwise None."""
+    row = conn.execute("""SELECT categories FROM decisions WHERE lens = ? AND story_id = ?
+        AND title = ? AND url IS ? AND categories_digest = ?""",
+        (lens.name, story.id, story.title, story.url, lens.categories_digest)).fetchone()
+    return None if row is None else tuple(json.loads(row[0]))
 
 
 def batches_to_judge(conn, lenses, stories, size=20):
@@ -93,8 +94,7 @@ def batches_to_judge(conn, lenses, stories, size=20):
         first_seen = conn.execute("SELECT first_seen_at FROM stories WHERE id = ?", (story.id,)).fetchone()[0]
         for lens in lenses:
             added_at = conn.execute("SELECT added_at FROM lenses WHERE name = ?", (lens.name,)).fetchone()[0]
-            decision = conn.execute("SELECT * FROM decisions WHERE lens = ? AND story_id = ?", (lens.name, story.id)).fetchone()
-            if first_seen >= added_at and not _current(decision, lens, story):
+            if first_seen >= added_at and _current_tags(conn, lens, story) is None:
                 needed.add((lens.name, story.id))
         if any((lens.name, story.id) in needed for lens in lenses):
             waiting.append(story)
@@ -123,22 +123,21 @@ def _points(conn, story_id):
         if not values or values[-1] != row[0]:
             values.append(row[0])
     # Retain first discovery and the most recent observations on manual reruns.
-    return tuple(values if len(values) <= 10 else [values[0], *values[-9:]])
+    return tuple(values if len(values) <= MAX_SHOWN_POINTS else [values[0], *values[1 - MAX_SHOWN_POINTS:]])
 
 
-def pending_lines(conn, settings, stories):
+def pending_lines(conn, lenses, stories):
     destinations = {}
-    for lens in settings.lenses:
+    for lens in lenses:
         destination = (lens.bot_token_env, lens.chat_id)
         for story in sorted(stories, key=lambda story: story.id):
-            decision = conn.execute("SELECT * FROM decisions WHERE lens = ? AND story_id = ?", (lens.name, story.id)).fetchone()
-            if not _current(decision, lens, story) or not json.loads(decision["categories"]):
+            tags = _current_tags(conn, lens, story)
+            if not tags:
                 continue
             if conn.execute("SELECT 1 FROM message_lines WHERE lens = ? AND story_id = ?", (lens.name, story.id)).fetchone():
                 continue
             destinations.setdefault(destination, []).append(Line(
-                lens.name, story.id, tuple(json.loads(decision["categories"])),
-                story.title, story.url, _points(conn, story.id),
+                lens.name, story.id, tags, story.title, story.url, _points(conn, story.id),
             ))
     return [Message(bot, chat, tuple(lines)) for (bot, chat), lines in destinations.items()]
 
@@ -154,8 +153,8 @@ def record_message(conn, message, telegram_message_id, now):
             ))
 
 
-def messages_to_edit(conn, settings, stories):
-    destinations = {(lens.bot_token_env, lens.chat_id) for lens in settings.lenses}
+def messages_to_edit(conn, lenses, stories):
+    destinations = {(lens.bot_token_env, lens.chat_id) for lens in lenses}
     current = {story.id: story.points for story in stories}
     for row in conn.execute("SELECT * FROM messages ORDER BY id"):
         if (row["bot_token_env"], row["chat_id"]) not in destinations:
@@ -163,7 +162,7 @@ def messages_to_edit(conn, settings, stories):
         lines, changed = [], False
         for saved in conn.execute("SELECT * FROM message_lines WHERE message_id = ? ORDER BY position", (row["id"],)):
             points = tuple(json.loads(saved["shown_points"]))
-            if saved["story_id"] in current and len(points) < 10 and current[saved["story_id"]] != points[-1]:
+            if saved["story_id"] in current and len(points) < MAX_SHOWN_POINTS and current[saved["story_id"]] != points[-1]:
                 points += (current[saved["story_id"]],)
                 changed = True
             lines.append(Line(saved["lens"], saved["story_id"], tuple(json.loads(saved["tags"])), saved["title"], saved["url"], points))

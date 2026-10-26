@@ -8,6 +8,8 @@ import re
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
+from hn_search.feed import MAX_SHOWN_POINTS
+
 LIMIT = 4096
 
 
@@ -27,7 +29,7 @@ def render(message, *, worst_case=False, markup=True):
     for line in message.lines:
         points = line.shown_points
         if worst_case:
-            points = (max(99999, *points),) * 10
+            points = (max(99999, *points),) * MAX_SHOWN_POINTS
         history = [f"{value} points" for value in points]
         if markup:
             history = [f"<s>{value}</s>" for value in history[:-1]] + history[-1:]
