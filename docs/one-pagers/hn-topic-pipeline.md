@@ -175,7 +175,7 @@ The last six lines redraw in place; their tallies here are illustrative. When th
 
 ```text
 research/run-1/
-├── report.md            # synthesis, thread index, coverage
+├── report.md            # synthesis, thread index, coverage, with Obsidian links
 └── stories/
     └── 40490610/
         ├── thread.md    # story link and every saved comment, in Markdown
@@ -225,7 +225,7 @@ Stan [asked for tests](https://github.com/stanislavkozlovski/hn-search/pull/6#di
 
 ### Folders, analyses, and the report
 
-Each relevant story's folder gets the archive's JSON export as `thread.json` and a Markdown rendering of the same saved snapshot as `thread.md`. Deep analysis then writes `analysis.md`: links to the story on HN and to `thread.md`, the description and verdict reasons, followed by the arguments, counterarguments, assumptions, conditions, lived experiences, and unresolved disagreements, each linked to its comments. The model returns comment IDs, and the pipeline renders them as `https://news.ycombinator.com/item?id=<id>` links.
+Each relevant story's folder gets the archive's JSON export as `thread.json` and a Markdown rendering of the same saved snapshot as `thread.md`. Deep analysis then writes `analysis.md`: links to the story on HN and to `thread.md`, the description and verdict reasons, followed by the arguments, counterarguments, assumptions, conditions, lived experiences, and unresolved disagreements, each linked to its comments. The model returns comment IDs, and the pipeline renders each as an Obsidian link to that comment's block in the story's `thread.md`, such as `[[./thread#^c40494448|tmnvix]]`; the comment's bullet there links on to HN.
 
 `thread.md` opens with the story title linked to its HN page, the article link, the author, the posting date, the reported comment count, and the archive date. Every saved comment follows as a nested bullet in display order, one level per reply, with its author, its time linked to the comment on HN, and its text converted from HN's HTML. Deleted, flagged, and unavailable items keep their place as `[deleted]`, `[flagged]`, or `[unavailable]`, so the reply tree stays intact. Each comment's bullet ends with an Obsidian block ID such as `^c40494448`, so a link can point at one comment; Obsidian [allows block IDs on list lines but not inside quotations](https://obsidian.md/help/Linking+notes+and+files/Internal+links), so replies nest as bullets rather than `>` quotes.
 
@@ -242,7 +242,19 @@ Each relevant story's folder gets the archive's JSON export as `thread.json` and
 
 The archive design [keeps Markdown exports out of `archive`](https://github.com/stanislavkozlovski/hn-search/blob/69a87347260824bd030383fec7f00c7609106c16/docs/one-pagers/hn-comment-archives.md?plain=1#L71), so the pipeline renders `thread.md` from the archive's saved records, and `archive` does not change. HN comments carry only [paragraphs, italics, code, and links](https://news.ycombinator.com/formatdoc), so the conversion handles those four plus HTML entities; Pass 2 specifies it, including escaping comment text that Obsidian would read as a link, tag, or heading.
 
-One synthesis call reads every relevant analysis and writes the cross-thread sections of `report.md`. The pipeline then appends the thread index and coverage from saved state. The index lists each relevant story's title, HN link, folder, and description. Coverage lists every other matched story under `not downloaded`, `unavailable`, `oversized`, `uncertain`, or `irrelevant`, each with its reason.
+One synthesis call reads every relevant analysis and writes the cross-thread sections of `report.md`. The pipeline then appends the thread index and coverage from saved state. The index links each relevant story's title to its `analysis.md`, adds links to its `thread.md` and its HN page, and gives its description, and the synthesis cites comments the same way the analyses do. Coverage lists every other matched story under `not downloaded`, `unavailable`, `oversized`, `uncertain`, or `irrelevant`, each with its reason. Coverage entries link to HN, because those stories have no folders.
+
+```markdown
+## Arguments
+
+Cheap credit, not too little building, drove prices, argues [[./stories/40490610/thread#^c40494448|tmnvix]]; [[./stories/40490610/thread#^c40494752|dan-robertson]] answers that rates alone don't explain the gaps between countries, citing dwellings per person in EU countries.
+
+## Thread index
+
+- [[./stories/40490610/analysis|Priced out of home ownership]] · [[./stories/40490610/thread|thread]] · [HN](https://news.ycombinator.com/item?id=40490610) — (description)
+```
+
+Every link starts with `./` because every story folder repeats `analysis.md` and `thread.md`. Obsidian reads folder paths in links [from the vault root](https://obsidian.md/help/Linking+notes+and+files/Internal+links) and resolves a bare `[[analysis]]` by name across the vault, while a [forum report](https://forum.obsidian.md/t/absolute-link-path-has-higher-precedence-than-relative-path/69542) shows `[[./A|A]]` resolving relative to the linking note, so the links keep working wherever Stan puts the run folder in a vault. Pass 2 checks each link form in Obsidian.
 
 When the analyses do not fit one synthesis call, `report.md` holds only the index and coverage and says that the synthesis did not fit. When no story is relevant, the pipeline skips the synthesis, and `report.md` holds only coverage.
 
