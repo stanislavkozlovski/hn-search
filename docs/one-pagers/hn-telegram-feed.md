@@ -19,7 +19,7 @@
 
 Use a configurable lightweight model, initially Luna, and reuse classifications while title/URL inputs and lens rules remain unchanged.
 
-The model never opens a story's link; it judges the story by its title and article URL, as Stan [asked in review](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4375121708).
+The model never opens a story's link or reads its HN comments; it judges each story by its title and article URL alone, as Stan [asked in review](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4375121708) and [confirmed](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4375642393).
 
 The feed uses points for admission, while PR #1 uses five comments to select discussions for research.
 
@@ -93,7 +93,7 @@ For example, at 10:00 the run first sees a two-hour-old story at 6 points and 0 
 
 ### Out-of-scope non-goals
 
-This iteration does not write into PR #1's research archive, catch up beyond ten hours, judge saved stories for a new lens, deduplicate across lenses in one chat, track uncertain sends, update a story's points after it leaves the ten-hour search, change anything but points in an edit, or let the classifier open links or use tools. Shared storage, new-lens evaluation of saved stories, zero-point watchlists, flat-hour retirement, and commands that search, re-judge, or resend saved stories are deferred.
+This iteration does not write into PR #1's research archive, catch up beyond ten hours, judge saved stories for a new lens, deduplicate across lenses in one chat, track uncertain sends, update a story's points after it leaves the ten-hour search, change anything but points in an edit, or let the classifier open links, read HN comments, or use tools. Shared storage, new-lens evaluation of saved stories, zero-point watchlists, flat-hour retirement, and commands that search, re-judge, or resend saved stories are deferred.
 
 ### Potential scope growth
 
@@ -167,7 +167,7 @@ HN titles and URLs, and the pages behind them, are attacker-controlled, so the c
 
 | Capability | Classifier access | Enforced by |
 |---|---|---|
-| Story data | The model reads each story's HN ID, title, and article URL, plus the lenses' categories. | The run builds the prompt from saved Algolia fields and fetches nothing for the model. |
+| Story data | The model reads each story's HN ID, title, and article URL, plus the lenses' categories, and no HN comments or post text. | The run builds each prompt from only the saved HN ID, title, and article URL and fetches nothing for the model. |
 | Links and web search | The model cannot open a link or search the web. | `web_search = "disabled"` removes Codex's search tool, and no remaining tool reaches the network. |
 | Commands and files | The model cannot run a command or read or write a file. | `features.shell_tool = false` and `tools.view_image = false` remove Codex's command and image-reading tools, and `--sandbox read-only` blocks writes in place of the bypass flag. |
 | MCP servers and settings | The classifier gets none of the MCP servers or settings in Stan's Codex config. | `--ignore-user-config` skips `~/.codex/config.toml`, where Codex MCP servers are configured. |
@@ -232,7 +232,8 @@ For example, if runs stop at 03:00 and Stan restarts them by 13:00, the next run
 | The feed polls the official HN API's new-story list and fetches each item. | The feed would request every story separately each hour to read its points and creation time, while one Algolia query filters both. |
 | The run asks the model about every returned story every hour. | The run would repeat each judgment up to ten times while a story stays in the ten-hour search. |
 | The classifier tags stories against one taxonomy that all lenses share. | Editing one lens's categories would invalidate every lens's saved decisions. |
-| The classifier opens each story's link, or searches the web, before tagging it. | The linked page is attacker-controlled, and the tool that fetches it would also let injected instructions send requests; Stan [chose title and URL only](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4375121708). |
+| The classifier opens each story's link, or searches the web, before tagging it. | The linked page is attacker-controlled, and the tool that fetches it would also let injected instructions send requests; Stan [ruled out opening links](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4375121708). |
+| The classifier also reads each story's HN comments. | Stan [chose title and URL only](https://github.com/stanislavkozlovski/hn-search/pull/3#discussion_r4375642393). At 09:21 UTC on 2026-10-26, 10 of the 19 stories at 5–9 points in the ten-hour search had no comments, so comments would help only if new ones re-judged a story, and their unmoderated text gives injected instructions far more room than a title. |
 | The feed calls OpenAI's API directly, where the model has no tools to remove. | Pass 0 reuses `stan_ai_client`, which [calls no API directly](https://github.com/stanislavkozlovski/stan_ai_client/blob/e423a5548292e51c5ffab1b8420a67ae38d7f4a2/README.md#L5-L8) and drives the logged-in `codex` CLI; a direct call would add an API key and separate billing. |
 | The sender posts a follow-up message whenever a story's points change. | The chat would repeat each story's link up to ten times, while one edited message keeps its score history in place. |
 | The run pings Kuma when it starts. | A run that starts and then fails would still look healthy. |
