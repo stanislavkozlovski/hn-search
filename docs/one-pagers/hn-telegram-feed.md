@@ -37,11 +37,13 @@ Cap Telegram send retries, as Stan [asked in review](https://github.com/stanisla
 
 **Deferred — revisiting saved stories:** Commands that search saved stories, re-run lenses over them, or resend them are outside the first delivery.
 
+**Deferred — editing sent messages:** Stan [keeps sent messages unchanged for now](https://github.com/stanislavkozlovski/hn-search/pull/3#issuecomment-6411082121); editing them with later score growth is outside the first delivery.
+
 ### How would you describe the end-to-end user experience?
 
 - **End-to-end user experience:** Each hour, Stan receives one message or batch per configured Telegram destination with matching titles, article/HN links, categories, points, and any observed score growth.
 
-For example, a two-hour-old story at six points and zero comments can reach a matching bot; the next result at nineteen points updates growth without repeating classification.
+For example, a two-hour-old story at six points and zero comments can reach a matching bot; the next result at nineteen points updates its saved growth without repeating classification or editing the sent message.
 
 ### What existing data, behavior, or integrations must keep working?
 
@@ -65,17 +67,17 @@ For example, a two-hour-old story at six points and zero comments can reach a ma
 | When Stan adds a lens, saved candidates already have decisions for existing lenses. | The new lens only sees newly discovered candidates. | The feed evaluates saved candidates still within the lookback for the new lens. | IGNORE |
 | When two lenses select one story for the same bot and chat, both enqueue it. | Stan receives duplicate links in that destination. | The feed deduplicates delivery across lenses for each bot and chat. | IGNORE |
 | When Telegram accepts a send but its response is lost, the feed cannot confirm delivery. | The sender may duplicate links when retrying. | The feed records uncertain sends and defines retry behavior. | IGNORE |
-| When a sent story gains points in later runs, the sender leaves Stan's earlier message unchanged. | Stan sees later growth only in the feed database, so most messages show points without growth. | The sender edits each sent message with its stories' latest growth while they stay in the ten-hour search. | UNDECIDED — HANDLE / IGNORE |
+| When a sent story gains points in later runs, the sender leaves Stan's earlier message unchanged. | Stan sees later growth only in the feed database, so most messages show points without growth. | The sender edits each sent message with its stories' latest growth while they stay in the ten-hour search. | IGNORE |
 
 ## Pass 1: High-level design
 
-**Review status:** Stan decided Pass 0's first five rows in review. The new last row, score growth after a story is sent, reopens Pass 0, so Pass 1 is not settled; the rest is drafted for review.
+**Review status:** Stan has decided all six Pass 0 edge-case rows, so Pass 0 is settled; Pass 1 below remains under review.
 
 ## Proposal
 
 Add an hourly feed run, with its own SQLite database, to the `hn_search` package PR #1 proposes. Each run saves every five-point story from Algolia's ten-hour window, asks the configured model only about stories a lens has not yet judged, and posts each new match once to that lens's bot and chat.
 
-For example, at 10:00 the run first sees a two-hour-old story at 6 points and 0 comments. One batched model call tags it `agents` for the `ai-agents` lens, and that lens's bot posts it. At 11:00 the run records 19 points, so the saved growth reads `6 → 19 points over 60 minutes`; it makes no model call and sends no second message.
+For example, at 10:00 the run first sees a two-hour-old story at 6 points and 0 comments. One batched model call tags it `agents` for the `ai-agents` lens, and that lens's bot posts it. At 11:00 the run records 19 points, so the saved growth reads `6 → 19 points over 60 minutes`; it makes no model call, sends no second message, and leaves the 10:00 message at 6 points.
 
 ### In-scope goals
 
@@ -87,7 +89,7 @@ For example, at 10:00 the run first sees a two-hour-old story at 6 points and 0 
 
 ### Out-of-scope non-goals
 
-This iteration does not write into PR #1's research archive, catch up beyond ten hours, judge saved stories for a new lens, deduplicate across lenses in one chat, or track uncertain sends. Shared storage, new-lens evaluation of saved stories, zero-point watchlists, flat-hour retirement, and commands that search, re-judge, or resend saved stories are deferred.
+This iteration does not write into PR #1's research archive, catch up beyond ten hours, judge saved stories for a new lens, deduplicate across lenses in one chat, track uncertain sends, or edit sent messages. Shared storage, new-lens evaluation of saved stories, editing sent messages with later score growth, zero-point watchlists, flat-hour retirement, and commands that search, re-judge, or resend saved stories are deferred.
 
 ### Potential scope growth
 
@@ -145,7 +147,7 @@ The sender groups a run's pending matches by bot and chat and sends each destina
 
 A failed send stays pending, and each later run tries it once more while its story stays in the ten-hour search. A retry after a lost Telegram response can repeat links. Unsent stories stay saved.
 
-Each observation updates a story's `N → M points over X minutes` from its first and latest points. A lens judges a story at its first observation, so most messages show points without growth; a retried send or a later re-judgment shows it. Growth after a story is sent is the reopened Pass 0 decision.
+Each observation updates a story's `N → M points over X minutes` from its first and latest points. A lens judges a story at its first observation, so most messages show points without growth; a retried send or a later re-judgment shows it. The sender leaves sent messages unchanged, as Stan [chose in review](https://github.com/stanislavkozlovski/hn-search/pull/3#issuecomment-6411082121), so growth after a send stays in the feed database.
 
 ### Hourly schedule and Kuma alert
 
