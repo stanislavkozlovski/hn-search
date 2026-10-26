@@ -130,10 +130,10 @@ This design adds no daily collection schedule, external article fetching, or dis
 ### Public behavior changes (before / after)
 
 - **Before:** With the archive design in place, `collect` and `archive` are the only commands; neither needs a package, and nothing searches the catalog or calls AI.
-- **After:** `collect` and `archive` behave the same and still need no package. `research` needs `stan-ai-client==0.1.19` and a logged-in `codex` CLI. If Stan keeps the defaults and approves the AI's first four keywords, a run starts like this:
+- **After:** `collect` and `archive` behave the same and still need no package. `research` needs `stan-ai-client==0.1.19` and a logged-in `codex` CLI. `research` reads `hn.sqlite3` in the current directory, the path the README already uses, and writes run folders under `research/`; `--db` and `--out` override either. If that catalog file does not exist, `research` exits with `error: no catalog at hn.sqlite3; run collect first or pass --db` instead of creating an empty catalog that matches nothing. `collect` and `archive` still require `--db`, so a bare `collect` still exits 2 instead of starting a full historical sweep wherever it runs. If Stan keeps the defaults and approves the AI's first four keywords, a run starts like this:
 
 ```text
-$ python3 -m hn_search --db hn.sqlite3 research --out research
+$ python3 -m hn_search research
 Model settings:
   keywords         gpt-6-luna   medium
   classification   gpt-6-luna   high
