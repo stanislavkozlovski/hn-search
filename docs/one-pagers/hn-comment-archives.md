@@ -105,50 +105,73 @@ The first `archive` run adds both tables and moves `user_version` from 1 to 2 in
 
 ### Download algorithm
 
-`archive_story()` downloads one catalog story; the `archive` command adds steps 1 and 8 around it, and the topic pipeline calls it directly.
+`archive` handles requested roots in order, one story and one HN request at a time. Saved items are the checkpoint: pending IDs are recomputed from SQLite, so no separate queue has to survive a crash.
 
-1. **Check the catalog.** `main()` opens the `--db` file with `open_catalog()`, and `archive` looks up every requested ID in `posts`. If any ID has no row, `archive` prints the error for each such ID and stops before sending a request.
-2. **Reuse or start.** `archive_story()` reads the root's `archives` row and returns at once, with zero requests, when it is `complete`. Otherwise it commits a new `incomplete` row with `started_at`, or keeps an existing `incomplete` row and its original `started_at`.
-3. **Rebuild pending from SQLite.** `archive_story()` starts pending as `[root_id]` while the root has no `archive_items` row. After that, pending holds every ID listed in a saved item's `kids`, or in a saved poll root's `parts`, that has no row yet, so a rerun starts where the last commit stopped.
-4. **Fetch one item.** `archive_story()` takes the next pending ID, skips it if it is already saved, and sends one `GET https://hacker-news.firebaseio.com/v0/item/<id>.json`. A network, HTTP, or JSON failure raises at once, with no retry.
-5. **Save it.** `archive_story()` stores the response unchanged (a JSON object, or `null` for an unavailable ID) with `root_id` and `retrieved_at`, and commits it before the next request.
-6. **Queue its children.** `archive_story()` appends a saved object's `kids` to pending in order, plus the poll root's `parts`; deleted and dead items still contribute their `kids`. Steps 4–6 repeat until pending is empty.
-7. **Mark complete.** `archive_story()` commits `status = 'complete'` and `finished_at` in one transaction.
-8. **Export and print.** `archive` writes `<export-dir>/<root_id>.json` from SQLite and prints the story's line, adding `reused=true` when step 2 returned early. `comments` counts saved reply objects, `unavailable` counts `null` responses, and `reported_descendants` is the saved root's `descendants`.
+1. **Check the catalog.** Drop repeated IDs, keeping their order. If any ID has no `posts` row, print one error per missing ID and stop before any request.
+2. **Skip finished stories.** A root whose archive is `complete` sends no request and goes straight to step 6.
+3. **Open or resume.** Create the root's `archives` row as `incomplete` with `started_at`, or keep its existing incomplete row. Pending IDs are the root if it is unsaved, plus every ID listed in a saved item's `kids`, or in a saved poll root's `parts`, that has no `archive_items` row.
+4. **Fetch one item.** Take the oldest pending ID, request `https://hacker-news.firebaseio.com/v0/item/<id>.json`, and commit the response with `retrieved_at` before the next request:
+   - A JSON object is saved unchanged; its `kids` join the pending IDs in display order, and so does a poll root's `parts`.
+   - A deleted item such as `45544678` arrives without author or text, and a flagged dead item such as `38311526` arrives with the text `[flagged]`; both are saved as returned, and their `kids` are still followed.
+   - `null` is saved as unavailable and has nothing to follow; a story whose root is `null` completes with no comments and `unavailable=1`.
+5. **Stop on failure.** A network, HTTP, or invalid-JSON failure leaves that ID pending, prints the story's `status=incomplete` line, and exits 1. Committed items survive any failure or interrupt, so rerunning the command resumes at step 3 without refetching them.
+6. **Finish.** Once nothing is pending, mark the archive `complete` with `finished_at`. For every complete story, including reused ones, rebuild `<export-dir>/<root>.json` from SQLite by writing a temporary file and renaming it, then print the story's line.
 
-```text
-archive(ids, export_dir):                                # CLI command
-    missing = [id for id in ids if id not in posts]      # step 1
-    if missing: print the error for each missing ID; stop
-    for root_id in ids:                                  # command-line order
-        result = archive_story(root_id)                  # a raise exits 1
-        write export_dir/<root_id>.json from SQLite      # step 8
-        print the summary line, plus reused=true if result == reused
+```python
+def archive(conn, requested_ids, export_dir):
+    roots = list(dict.fromkeys(requested_ids))              # 1. keep order, drop repeats
+    missing = [r for r in roots if not in_posts(conn, r)]
+    if missing:
+        fail_before_any_request(missing)                    # one "not in the catalog" error per ID
+    for root in roots:
+        archive_story(conn, root, export_dir)
 
-archive_story(root_id):
-    row = archives[root_id]                              # step 2
-    if row and row.status == "complete": return reused
-    if not row: commit archives[root_id] = {status: "incomplete", started_at: now}
-    if root_id not in archive_items:                     # step 3
-        pending = [root_id]
-    else:
-        pending = [id for id in kids of saved items + parts of a saved poll root
-                   if id not in archive_items]
-    while pending:                                       # steps 4-6
-        id = pending.pop_front()
-        if id in archive_items: continue
-        item = GET https://hacker-news.firebaseio.com/v0/item/<id>.json   # object or null; raises
-        commit archive_items[id] = {root: root_id, item: item, retrieved_at: now}
-        if item is not null:
-            pending.extend(item.kids)
-            if id == root_id and item.type == "poll": pending.extend(item.parts)
-    commit archives[root_id] = {status: "complete", finished_at: now}    # step 7
-    return downloaded
+
+def archive_story(conn, root, export_dir):
+    if archive_status(conn, root) != "complete":            # 2. complete roots skip to step 6
+        start_or_resume(conn, root, started_at=now())       # 3. status stays incomplete
+        pending = deque(pending_ids(conn, root))
+        try:
+            while pending:                                  # 4. one request at a time
+                item_id = pending.popleft()
+                item = fetch_item(item_id)                  # dict, or None for HN's null
+                save_item(conn, root, item_id, item, retrieved_at=now())  # one commit
+                pending.extend(children(root, item_id, item))
+        except Exception:                                   # 5. e.g. network, HTTP, or JSON failure
+            print_line(conn, root)                          # status=incomplete comments=3 pending=1
+            raise                                           # traceback, exit 1
+        mark_complete(conn, root, finished_at=now())        # 6.
+    write_export_atomically(conn, root, export_dir / f"{root}.json")
+    print_line(conn, root)
+
+
+def children(root, item_id, item):
+    if item is None:
+        return []                                           # unavailable: nothing to follow
+    ids = list(item.get("kids", []))                        # replies in display order
+    if item_id == root and item.get("type") == "poll":
+        ids += item.get("parts", [])                        # poll options
+    return ids
+
+
+def pending_ids(conn, root):
+    saved = saved_items(conn, root)                         # {id: dict or None}
+    listed = [root] + [c for i, item in saved.items() for c in children(root, i, item)]
+    return [i for i in dict.fromkeys(listed) if i not in saved]
 ```
 
-For `4517440`, pending starts as `[4517440]`. The root lists `4517521` and `4520037`, `4517521` lists `4517587` and `4517797`, and `4517797` lists `4517878`, so pending empties after six requests: the root and its five replies. If the request for `4517797` times out, `archive` exits 1 with four items saved, the story still `incomplete`, and no export; the rerun rebuilds pending as `[4517797]` and finishes in two requests.
+For story `4517440`, HN returned this tree on 2026-10-26:
 
-Poll `126809`'s first response queues its 25 `kids` and three `parts`, `126810` through `126812`. The dead comment `38311526` is saved with `dead: true` and its `[flagged]` text, and its four replies are still fetched; the deleted comment `45544678` is saved exactly as HN returns it, with no author or text.
+```text
+4517440  story  "Trulia Rent vs. Buy Map Visualizes How Mortgage Rates, Taxes Timing Change Costs"  descendants=5
+├── 4517521  Daisy
+│   ├── 4517587  DamnYuppie
+│   └── 4517797  pc86
+│       └── 4517878  malyk
+└── 4520037  Evbn
+```
+
+A first run sends six requests, for `4517440`, `4517521`, `4520037`, `4517587`, `4517797`, and `4517878`, then completes with five comments. If the request for `4517797` times out, the run prints `archive root=4517440 status=incomplete comments=3 pending=1` and exits 1. The rerun recomputes pending as `[4517797]` from the saved `kids` lists, sends two requests, for `4517797` and its newly listed reply `4517878`, and completes; any later run sends none.
 
 ### Topic pipeline handoff
 
