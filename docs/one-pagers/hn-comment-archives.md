@@ -362,10 +362,11 @@ The topic pipeline calls `archive_story(conn, root, export_dir)` for each matche
 ```sql
 CREATE TABLE IF NOT EXISTS archives (
     root_id INTEGER PRIMARY KEY,
-    status TEXT NOT NULL CHECK (status IN ('incomplete', 'complete')),
+    status TEXT GENERATED ALWAYS AS (
+        CASE WHEN finished_at IS NULL THEN 'incomplete' ELSE 'complete' END
+    ) VIRTUAL,
     started_at INTEGER NOT NULL,
-    finished_at INTEGER,
-    CHECK ((status = 'complete') = (finished_at IS NOT NULL))
+    finished_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS archive_items (
     root_id INTEGER NOT NULL,
@@ -375,6 +376,8 @@ CREATE TABLE IF NOT EXISTS archive_items (
     PRIMARY KEY (root_id, item_id)
 );
 ```
+
+- SQLite computes `status` from `finished_at`; the downloader writes only `finished_at` for completion, setting it once when the root completes.
 
 - Store unavailable responses as JSON text `null`, preserving their distinction from missing rows. Timestamps use UTC epoch seconds; resume retains `started_at`, and reuse retains `finished_at`. The composite primary key supports per-root reads; no additional index or queue table is needed.
 - JSON contains `root_id`, status, observation timestamps, counts, `reported_descendants`, a `root` node, and ordered `poll_options`. Each node contains `id`, `hn_url`, `retrieved_at`, the unchanged API value under `item`, and ordered `replies`. An unavailable root therefore has `root.item = null`.
