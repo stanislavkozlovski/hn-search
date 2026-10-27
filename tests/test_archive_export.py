@@ -18,7 +18,8 @@ from tests.helpers import HNOpener, NOW, post
 class MarkdownTests(unittest.TestCase):
     def test_paragraphs_italics_links_entities_and_unicode(self):
         result = html_to_markdown('<p>雪 &amp; café &lt;tag&gt; &#39;ok&#39;</p><p><i>italic</i> <em>also</em> <b>bold</b> <a href="https://example.com/a_(b)?x=1&amp;y=2">a &amp; b</a><br>next</p>')
-        self.assertEqual(result, "雪 & café \\<tag\\> 'ok'\n\n*italic* *also* **bold** [a & b](https://example.com/a_%28b%29?x=1&y=2)\nnext")
+        self.assertEqual(result, "雪 \\& café \\<tag\\> 'ok'\n\n*italic* *also* **bold** [a \\& b](https://example.com/a_%28b%29?x=1&y=2)\nnext")
+        self.assertEqual(html_to_markdown('The literal &amp;nbsp; is six characters. AT&amp;T'), r'The literal \&nbsp; is six characters\. AT\&T')
 
     def test_literal_obsidian_and_markdown_syntax_is_escaped(self):
         result = html_to_markdown(r'[[x]] ![[image]] #tag ^c1 %%hidden%% ==bright== $math$ **bold** `tick` \ [x](url)')
@@ -80,7 +81,7 @@ class ExportTests(unittest.TestCase):
         self.assertTrue(markdown.startswith('# [雪 \\[\\[Title\\]\\]](https://news.ycombinator.com/item?id=1)'))
         self.assertIn('Article: [https://example\\.com/a\\(b\\)](https://example.com/a%28b%29)', markdown)
         self.assertIn('Root *text*', markdown)
-        self.assertIn('Choice & one', markdown)
+        self.assertIn(r'Choice \& one', markdown)
         self.assertIn('votes: 73', markdown)
         self.assertLess(markdown.index('^c3'), markdown.index('^c4'))
         self.assertLess(markdown.index('^c4'), markdown.index('^c2'))

@@ -102,7 +102,7 @@ def _json_chunks(value):
 
 def _escape(text):
     # Include Obsidian's tags, block IDs, highlights, comments, and math.
-    return re.sub(r"([\\`*_{}\[\]<>()#!|~^$=%+\-.])", r"\\\1", text)
+    return re.sub(r"([\\`*_{}\[\]<>()#!|~^$=%+&\-.])", r"\\\1", text)
 
 
 def _link(url):
