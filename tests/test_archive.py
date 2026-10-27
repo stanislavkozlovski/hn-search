@@ -150,7 +150,8 @@ class ArchiveTests(unittest.TestCase):
                    {"id": 1, "by": None}, {"id": 1, "text": []}, {"id": 1, "title": 4},
                    {"id": 1, "url": False}, {"id": 1, "type": []}, {"id": 1, "parent": 0},
                    {"id": 1, "time": -1}, {"id": 1, "descendants": True}, {"id": 1, "score": "4"},
-                   {"id": 1, "dead": 1}, {"id": 1, "deleted": "true"}, b'{', b'{"id":1,"extra":NaN}', b'\xff']
+                   {"id": 1, "dead": 1}, {"id": 1, "deleted": "true"}, b'{', b'{"id":1,"extra":NaN}',
+                   b'{"id":1,"extra":1e999}', b'\xff']
         for payload in invalid:
             with self.subTest(payload=payload), self.assertRaises((ValueError, UnicodeError)):
                 self.run_archive([1], HNOpener({1: payload}))

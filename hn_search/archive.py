@@ -8,7 +8,7 @@ from pathlib import Path
 import time
 from urllib.request import urlopen
 
-from hn_search.archive_export import archive_counts, load_items, write_exports
+from hn_search.archive_export import archive_counts, load_items, poll_options, write_exports
 from hn_search.catalog import migrate_archives
 
 
@@ -18,15 +18,11 @@ class UncataloguedStories(ValueError):
         super().__init__(f"Stories absent from the catalog: {', '.join(map(str, roots))}")
 
 
-def _invalid_constant(value):
-    raise ValueError(f"Invalid JSON constant: {value}")
-
-
 def fetch_item(item_id, *, opener, clock):
     """Workers perform only HTTP, validation, and retrieval timestamping."""
     url = f"https://hacker-news.firebaseio.com/v0/item/{item_id}.json"
     with opener(url, timeout=30) as response:
-        item = json.loads(response.read(), parse_constant=_invalid_constant)
+        item = json.loads(response.read())
     if item is not None:
         if not isinstance(item, dict) or type(item.get("id")) is not int or item["id"] != item_id:
             raise ValueError(f"Invalid HN item {item_id}: expected an object with matching id, or null")
@@ -49,8 +45,8 @@ def children(root, item_id, item):
     if item is None:
         return []
     ids = list(item.get("kids", []))
-    if item_id == root and item.get("type") == "poll":
-        ids.extend(item.get("parts", []))
+    if item_id == root:
+        ids.extend(poll_options(item))
     return ids
 
 
@@ -166,8 +162,10 @@ def archive(conn, roots, export_dir, *, opener=urlopen, clock=time.time):
                 state = active[root]
                 try:
                     item, retrieved_at = future.result()
+                    # Strict JSON rejects NaN and overflowed numbers that exports could never write.
+                    payload = json.dumps(item, ensure_ascii=False, allow_nan=False)
                     with conn:
-                        conn.execute("INSERT INTO archive_items VALUES (?, ?, ?, ?)", (root, item_id, json.dumps(item, ensure_ascii=False), retrieved_at))
+                        conn.execute("INSERT INTO archive_items VALUES (?, ?, ?, ?)", (root, item_id, payload, retrieved_at))
                 except Exception as error:
                     error.add_note(f"archive root={root} item={item_id}")
                     if first_error is None:

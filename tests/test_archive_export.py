@@ -17,18 +17,18 @@ from tests.helpers import HNOpener, NOW, post
 
 class MarkdownTests(unittest.TestCase):
     def test_paragraphs_italics_links_entities_and_unicode(self):
-        result = html_to_markdown('<p>雪 &amp; café &lt;tag&gt; &#39;ok&#39;</p><p><i>italic</i> <em>also</em> <b>bold</b> <a href="https://example.com/a_(b)?x=1&amp;y=2">a &amp; b</a><br>next</p>')
-        self.assertEqual(result, "雪 \\& café \\<tag\\> 'ok'\n\n*italic* *also* **bold** [a \\& b](https://example.com/a_%28b%29?x=1&y=2)\nnext")
+        result = html_to_markdown('<p>雪 &amp; café &lt;tag&gt; &#39;ok&#39;</p><p><i>italic</i> <a href="https://example.com/a_(b)?x=1&amp;y=2">a &amp; b</a></p>')
+        self.assertEqual(result, "雪 \\& café \\<tag\\> 'ok'\n\n*italic* [a \\& b](https://example.com/a_%28b%29?x=1&y=2)")
         self.assertEqual(html_to_markdown('The literal &amp;nbsp; is six characters. AT&amp;T'), r'The literal \&nbsp; is six characters\. AT\&T')
+        # HN emits no other tags; any that appear keep their escaped text.
+        self.assertEqual(html_to_markdown('<b>bold</b> <code>`x`</code><br>'), r'bold \`x\`')
 
     def test_literal_obsidian_and_markdown_syntax_is_escaped(self):
         result = html_to_markdown(r'[[x]] ![[image]] #tag ^c1 %%hidden%% ==bright== $math$ **bold** `tick` \ [x](url)')
         for literal in (r'\[\[x\]\]', r'\!\[\[image\]\]', r'\#tag', r'\^c1', r'\%\%hidden\%\%', r'\=\=bright\=\=', r'\$math\$', r'\*\*bold\*\*', r'\`tick\`', r'\\', r'\[x\]\(url\)'):
             self.assertIn(literal, result)
 
-    def test_inline_and_preformatted_code_preserve_text_and_backtick_runs(self):
-        self.assertEqual(html_to_markdown('<code>a &amp; `b`</code>'), '`` a & `b` ``')
-        self.assertEqual(html_to_markdown('<code>`x`</code>'), '`` `x` ``')
+    def test_preformatted_code_preserves_text_and_backtick_runs(self):
         self.assertEqual(html_to_markdown('<pre><code>[[x]]\n\n```\n^c1\n</code></pre>'), '````\n[[x]]\n\n```\n^c1\n````')
         self.assertEqual(html_to_markdown('<pre>unclosed &amp; code'), '```\nunclosed & code\n```')
 

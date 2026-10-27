@@ -19,9 +19,14 @@ def load_items(conn, root):
     }
 
 
+def poll_options(item):
+    """A poll lists its option IDs in parts; any other item has none."""
+    return item.get("parts", []) if item and item.get("type") == "poll" else []
+
+
 def archive_counts(root, items):
     item = items.get(root, (None, None))[0]
-    options = set(item.get("parts", [])) if item and item.get("type") == "poll" else set()
+    options = set(poll_options(item))
     return {
         "saved_items": len(items),
         "comments": sum(value is not None and item_id != root and item_id not in options for item_id, (value, _) in items.items()),
@@ -44,8 +49,7 @@ def _snapshot(conn, root):
         for item_id, (item, retrieved_at) in items.items()
     }
     root_node = nodes[root]
-    item = root_node["item"]
-    option_ids = list(dict.fromkeys(item.get("parts", []))) if item and item.get("type") == "poll" else []
+    option_ids = list(dict.fromkeys(poll_options(root_node["item"])))
     options = [nodes[item_id] for item_id in option_ids if item_id != root]
     visited = {root, *option_ids}
     queue = [root_node, *options]
@@ -115,23 +119,19 @@ def _link(url):
     return quote(target, safe="/:?#@!$&'*,;=+%-._~")
 
 
-def _code(text, *, block=False):
+def _code(text):
     longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
-    fence = "`" * max(3 if block else 1, longest + 1)
-    if block:
-        return f"\n\n{fence}\n{text.rstrip(chr(10))}\n{fence}\n\n"
-    text = text.replace("\n", " ")
-    if text.startswith(("`", " ")) or text.endswith(("`", " ")):
-        text = f" {text} "
-    return f"{fence}{text}{fence}"
+    fence = "`" * max(3, longest + 1)
+    return f"\n\n{fence}\n{text.rstrip(chr(10))}\n{fence}\n\n"
 
 
 class _MarkdownParser(HTMLParser):
+    """Render only HN's markup: <p>, <i>, <pre><code>, and <a>; other tags keep their text."""
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.output = []
         self.code = None
-        self.pre = False
         self.links = []
 
     def paragraph_break(self):
@@ -140,18 +140,13 @@ class _MarkdownParser(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         if tag == "pre":
-            self.pre = True
-            self.code = []
-        elif tag == "code" and not self.pre:
             self.code = []
         elif self.code is not None:
             return
         elif tag == "p":
             self.paragraph_break()
-        elif tag == "br":
-            self.output.append("\n")
-        elif tag in ("i", "em", "b", "strong"):
-            self.output.append("*" if tag in ("i", "em") else "**")
+        elif tag == "i":
+            self.output.append("*")
         elif tag == "a":
             href = dict(attrs).get("href")
             target = _link(href) if href else None
@@ -160,19 +155,15 @@ class _MarkdownParser(HTMLParser):
                 self.output.append("[")
 
     def handle_endtag(self, tag):
-        if tag == "pre" and self.pre:
-            self.output.append(_code("".join(self.code), block=True))
-            self.code = None
-            self.pre = False
-        elif tag == "code" and not self.pre and self.code is not None:
+        if tag == "pre" and self.code is not None:
             self.output.append(_code("".join(self.code)))
             self.code = None
         elif self.code is not None:
             return
         elif tag == "p":
             self.paragraph_break()
-        elif tag in ("i", "em", "b", "strong"):
-            self.output.append("*" if tag in ("i", "em") else "**")
+        elif tag == "i":
+            self.output.append("*")
         elif tag == "a" and self.links:
             target = self.links.pop()
             if target:
@@ -190,7 +181,7 @@ def html_to_markdown(text):
     parser.feed(text)
     parser.close()
     if parser.code is not None:
-        parser.output.append(_code("".join(parser.code), block=parser.pre))
+        parser.output.append(_code("".join(parser.code)))
     return "".join(parser.output).strip()
 
 
@@ -257,19 +248,15 @@ def _markdown_chunks(snapshot):
 
 
 def _atomic_write(path, chunks):
-    temporary = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
-            temporary = Path(handle.name)
-            for chunk in chunks:
-                handle.write(chunk)
-        os.replace(temporary, path)
+        # Exiting removes the temporary file unless os.replace() already moved it.
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete_on_close=False) as handle:
+            handle.writelines(chunks)
+            handle.close()
+            os.replace(handle.name, path)
     except OSError as error:
         error.add_note(f"export path={path}")
         raise
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
 
 
 def write_exports(conn, root, export_dir):
