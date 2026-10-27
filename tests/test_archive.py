@@ -143,6 +143,25 @@ class ArchiveTests(unittest.TestCase):
         for marker in ("[deleted]", "[flagged]", "[unavailable]", "votes: 73", "^c2", "^c3", "^c4"):
             self.assertIn(marker, markdown)
 
+    def test_dead_root_with_negative_descendants_completes_and_preserves_evidence(self):
+        self.add_roots(1)
+        records = {
+            1: {"id": 1, "type": "story", "dead": True, "descendants": -1, "kids": [2]},
+            2: {"id": 2, "type": "comment", "parent": 1, "text": "Saved reply"},
+        }
+        opener = HNOpener(records)
+        self.run_archive([1], opener)
+        self.assertEqual(opener.requests, [1, 2])
+        saved = {row[0]: json.loads(row[1]) for row in self.conn.execute("SELECT item_id, item_json FROM archive_items")}
+        self.assertEqual(saved, records)
+        payload = self.payload(1)
+        self.assertEqual(payload["status"], "complete")
+        self.assertEqual(payload["reported_descendants"], -1)
+        self.assertEqual(payload["root"]["item"], records[1])
+        self.assertEqual(payload["root"]["replies"][0]["item"], records[2])
+        self.assertIn("reported_descendants=-1", self.output.getvalue())
+        self.assertIn("Reported comments: -1", (self.exports / "1.md").read_text())
+
     def test_invalid_payloads_never_become_checkpoints(self):
         self.add_roots(1)
         invalid = [[], 1, "text", {}, {"id": True}, {"id": 2}, {"id": 1, "kids": None},

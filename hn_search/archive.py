@@ -30,7 +30,7 @@ def fetch_item(item_id, *, opener, clock):
             if key in item and not isinstance(item[key], str):
                 raise ValueError(f"Invalid HN item {item_id}: {key} must be a string")
         for key in ("time", "descendants", "score", "parent"):
-            if key in item and (type(item[key]) is not int or item[key] < (1 if key == "parent" else 0)):
+            if key in item and (type(item[key]) is not int or (key != "descendants" and item[key] < (1 if key == "parent" else 0))):
                 raise ValueError(f"Invalid HN item {item_id}: {key} must be a valid integer")
         for key in ("deleted", "dead"):
             if key in item and type(item[key]) is not bool:
