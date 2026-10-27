@@ -265,6 +265,127 @@ The topic pipeline calls `archive_story(conn, root, export_dir)` for each matche
 
 -----------------------------------
 
+## Pass 2: Low-level design
+
+## Low-level coding implementation
+
+**Existing files**
+
+- Update [`main()`](https://github.com/stanislavkozlovski/hn-search/blob/99382a023303b8d839b0427b7b4f468bc8d87589/hn_search/__main__.py#L12-L19): make top-level `--db` optional during parsing, require it for `collect` before opening SQLite, and add `archive` with one or more integer IDs and `--export-dir`. Resolve archive defaults to `hn.sqlite3` and `exports/`; retain the injected `opener` and `clock`.
+- Add `migrate_archives(conn)` to `hn_search/catalog.py`. Keep [`open_catalog()` and `commit_page()`](https://github.com/stanislavkozlovski/hn-search/blob/99382a023303b8d839b0427b7b4f468bc8d87589/hn_search/catalog.py#L6-L55) unchanged so collection alone still initializes v1.
+- Update `README.md` with archive usage, failure recovery, and serialized invocations; add `/exports/` to `.gitignore`.
+- Extend `tests/test_catalog.py` for migration coverage and `tests/helpers.py` with an HN-specific fake opener. Its existing `ScriptedOpener` accepts only ClickHouse requests.
+
+**New files**
+
+- `hn_search/archive.py`: `archive()`, `archive_story()`, the HTTP helper, catalog admission, pending reconstruction, and the eight-root scheduler. A dedicated `ValueError` subclass carries uncatalogued IDs so the CLI can print each approved error and exit 1.
+- `hn_search/archive_export.py`: `write_exports()` and `html_to_markdown()`, shared by first downloads and reuse.
+- `tests/test_archive.py` and `tests/test_archive_export.py`: downloader, CLI, scheduler, and rendering coverage with inline API fixtures. No separate migration scripts or generated files are needed.
+
+**Implementation mechanics**
+
+- Check every deduplicated root against `posts` before migration or requests. Workers fetch only `/v0/item/<id>.json`, decode JSON, validate fields used by traversal and rendering, and timestamp the response before returning. Use `urlopen(..., timeout=30)`; this is a [blocking-operation timeout](https://docs.python.org/3.12/library/urllib.request.html#urllib.request.urlopen), with no promised whole-request deadline.
+- Keep every SQLite operation in the calling thread. Insert each response in its own transaction before scheduling that root again. Reconstruct pending IDs by walking saved `kids` and root poll `parts` with a deque and visited set; distinguish a saved JSON `null` from an absent row.
+- Inspect each completed-future batch before dispatching again. Preserve the first failure, cancel unstarted work, drain running requests, commit successes, and finish/export independently completed roots. Failed requests retain their original exception class for library callers.
+- Use iterative tree traversal and export emission so reply depth introduces no application limit. Convert HN paragraphs, italics, code, links, and entities; escape source-derived Markdown text before adding generated formatting and `^c<ID>` anchors.
+- No preparatory refactor is needed. `collect.py` and `clickhouse.py` already isolate metadata collection; archive scheduling and rendering fit in two dedicated modules without a shared transport framework or new dependency.
+
+## Validation matrix
+
+| Validation | Disposition | Behavior or consequence | Reason |
+|---|---|---|---|
+| V1 — CLI contract | Yes | Archive defaults and explicit overrides work; malformed arguments exit 2. Bare `collect` still exits 2 before opening SQLite. | Preserve the approved entrypoints. |
+| V2 — Catalog admission | Yes | Deduplicate roots in input order. Report every uncatalogued ID and exit 1 before requests or archive changes. | Uncatalogued roots remain outside scope. |
+| V3 — Additive migration and rollback | Yes | Create both archive tables and raise v1 to v2 atomically; preserve metadata, checkpoints, and higher versions. The old collector remains usable. | Preserve existing catalogs and the future pipeline handoff. |
+| V4 — API response contract | Yes | Accept an object or `null`; require matching object IDs and valid consumed fields, including positive integer child IDs. Malformed responses stop dispatch without saving that item. | Prevent incorrect checkpoints while retaining unknown fields. |
+| V5 — Source preservation | Yes | Keep original field values, HTML, flags, parent IDs, and retrieval times. Exports read the saved root independently of later `posts` updates. | Archives own their source evidence. |
+| V6 — Traversal and ordering | Yes | Fetch the root, reachable `kids`, and root poll `parts`; deduplicate requests per root and preserve display order without sampling or item limits. | Enforce the approved traversal boundary. |
+| V7 — Missing content | Yes | Save deleted/dead objects and follow their children. Save `null` as unavailable; a null root completes with zero comments and one unavailable item. | Missing text must remain visible. |
+| V8 — Poll context | Yes | Fetch every observed option and export its text and observed score in `parts` order, retaining missing-option markers. | Poll handling is approved. |
+| V9 — Scheduling and writer ownership | Yes | Admit at most eight roots, keep at most eight fetches outstanding and one per root, and use SQLite only in its creating thread. | Preserve the concurrency cap and connection contract. |
+| V10 — Durable checkpoints | Yes | Commit each item atomically. SQLite errors, interrupts, and process termination preserve earlier commits; uncommitted responses remain fetchable on rerun. | Saved items are the recovery checkpoint. |
+| V11 — Failure shutdown | Yes | The first observed request failure stops admission and dispatch. Cancel unstarted fetches, save running successes, finish eligible roots, then report remaining active roots and exit 1. | Preserve the approved shutdown decision. |
+| V12 — Completion and reuse | Yes | Complete only with no pending or in-flight item. Resume missing IDs only; completed roots retain their timestamps and issue zero requests at every age. | Maintain one immutable archive per root. |
+| V13 — Export writes and recovery | Yes | Export complete roots only, using a temporary file and rename per format. Print success after both writes; an export failure stops dispatch and drains fetches while SQLite stays complete. | A rerun rebuilds both files without downloading again. |
+| V14 — Markdown fidelity and anchors | Yes | Preserve nesting, supported HTML formatting, links, and visible markers; escape literal Obsidian syntax and generate one usable `^c<ID>` per comment outside code. | Deliver the approved reusable Markdown layout. |
+| V15 — Counts, times, and progress | Yes | Record UTC retrieval and observation times; distinguish saved comments, unavailable responses, and pending IDs. A reported-descendant mismatch does not prevent completion. | Completeness describes observed obtainable content. |
+| V16 — Library handoff | Yes | `archive_story()` uses the batch scheduler for one root, accepts explicit connection/export paths, and propagates failures after draining. | The pipeline chooses its own continuation policy. |
+| V17 — Parent reconciliation | No | Replies added after a parent's saved child list can remain absent, including after resume. | Pass 0 explicitly ignores concurrent additions. |
+| V18 — Snapshot refresh | No | Later edits, deletions, votes, and replies do not update saved items or completed archives. | One saved snapshot; no refresh at any age. |
+| V19 — Automatic retry and pacing | No | Timeouts, HTTP errors including 429, and invalid responses require a manual rerun; no backoff or fixed sleep is added. | Pass 1 bounds concurrency instead. |
+| V20 — Atomic export pair | No | If the second write fails, one file can already be replaced while the other remains old or missing; rerunning rebuilds both. | Atomic replacement applies separately to each file. |
+| V21 — Concurrent commands | No | Overlapping archive, collect, or pipeline invocations can fail with SQLite locking errors; Stan serializes commands. | Preserve the existing serialized-writer assumption. |
+| V22 — Topic-pipeline implementation | Defer | PR #6 wires classification, story folders, and reports to the settled archive contract after this implementation lands. | The companion design owns those behaviors. |
+
+## Test plan
+
+**Unit tests**
+
+- `tests/test_archive.py` covers payload validation, field preservation, child ordering/deduplication, deleted/dead parents, null responses, poll options, pending reconstruction, timestamps, and count definitions (V4–V8, V12, V15). Include unknown fields and omitted optional fields from the [official API contract](https://github.com/HackerNews/API/blob/6b8d4500a0c4c4a880a678928cc6d5e20e764015/README.md#items).
+- `tests/test_catalog.py` covers v1 migration, repeated migration, a higher version remaining unchanged, injected migration/item-write failures, and preservation of posts and collection progress (V3, V10).
+- `tests/test_archive_export.py` checks JSON source fidelity, ordered replies/options, placeholders, and Markdown formatting. Include Unicode, entities, literal `[[x]]`, `#tag`, `^c1`, `%%`, `==`, `$`, and backtick runs; exercise wide and deeply nested trees (V5–V8, V14–V15).
+
+**Integration tests**
+
+- Drive `main()` with a real temporary catalog and an ID-keyed fake opener: defaults, overrides, usage errors, duplicate roots, and a mixed batch containing several missing IDs (V1–V2).
+- Reproduce `4517440`: six requests initially; fail `4517797`; reopen SQLite and require only `4517797` and its unsaved child; rerun the complete archive with an opener that rejects every request (V10, V12, V15–V16).
+- Use events rather than sleeps to control more than eight roots. Record fetch concurrency and SQLite thread identity; inject a failure alongside successes, including one finishing root and one discovering another child. Verify no subsequent dispatch or ninth-root admission, successful commits, exports, and final incomplete lines (V9, V11, V13, V16).
+- Fail each export write/rename independently, including while another root is fetching. Verify saved data, suppressed success lines, drained responses, and zero-request repair. Kill a subprocess at checkpoint/completion boundaries and reopen its database (V10, V13).
+- Exercise `collect` at `64703b5` against a migrated database copy with fake HTTP, preserving archive rows and historical progress (V3).
+
+**Acceptance checks**
+
+- Run `python3 -m unittest discover -s tests`, retaining the existing collector and ClickHouse suite.
+- On a disposable collected catalog, archive `4517440` and poll `126809`, inspect both formats, and rerun for `reused=true`. In Obsidian, follow comment anchors for ordinary, multiline, code-first, and placeholder comments (V7–V8, V12–V15). These are planned checks; archive code does not exist at the design head.
+
+## Other considerations
+
+**Observability**
+
+- Keep flushed per-story lines as the live status surface. After draining, `archive root=4517440 status=incomplete comments=3 pending=1` reports the saved frontier, not an estimate of unseen descendants. Request failures identify the root and item on stderr; export failures identify the path. No monitoring service, metrics, or persistent error history is needed.
+
+**Internal APIs**
+
+- Add `archive(conn, roots, export_dir, *, opener=urlopen, clock=time.time)` and `archive_story(conn, root, export_dir, *, opener=urlopen, clock=time.time)` in `hn_search.archive`. Both require an initialized catalog connection owned by the caller's thread. Batch callers use `archive()` rather than concurrent calls sharing one connection.
+- Preserve `main(argv=None, *, opener=urlopen, clock=time.time)`. Add no AI client, model configuration, or relevance state.
+
+**Public behavior**
+
+- **Before:** `python3 -m hn_search --db hn.sqlite3 collect` collects metadata; `archive` is unavailable.
+- **After:** `python3 -m hn_search archive 4517440` uses `./hn.sqlite3` and writes `./exports/4517440.json` and `.md` after completion. `python3 -m hn_search --db hn.sqlite3 archive --export-dir exports 4517440` supplies both paths explicitly. `collect` keeps its explicit `--db` requirement.
+- Uncatalogued IDs produce the approved per-ID error and exit 1. Request/export failures exit 1 after draining; rerunning resumes downloads or rebuilds exports. No HTTP endpoint, environment variable, or configuration file is added.
+
+**Persistence**
+
+- `migrate_archives()` executes these additions and the conditional `user_version` update in one transaction. Raise the version to 2 only when lower; never downgrade it.
+
+```sql
+CREATE TABLE IF NOT EXISTS archives (
+    root_id INTEGER PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('incomplete', 'complete')),
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    CHECK ((status = 'complete') = (finished_at IS NOT NULL))
+);
+CREATE TABLE IF NOT EXISTS archive_items (
+    root_id INTEGER NOT NULL,
+    item_id INTEGER NOT NULL,
+    item_json TEXT NOT NULL,
+    retrieved_at INTEGER NOT NULL,
+    PRIMARY KEY (root_id, item_id)
+);
+```
+
+- Store unavailable responses as JSON text `null`, preserving their distinction from missing rows. Timestamps use UTC epoch seconds; resume retains `started_at`, and reuse retains `finished_at`. The composite primary key supports per-root reads; no additional index or queue table is needed.
+- JSON contains `root_id`, status, observation timestamps, counts, `reported_descendants`, a `root` node, and ordered `poll_options`. Each node contains `id`, `hn_url`, `retrieved_at`, the unchanged API value under `item`, and ordered `replies`. An unavailable root therefore has `root.item = null`.
+- `saved_items` counts stored responses including nulls; `comments` counts non-null reply items, including deleted/dead placeholders, excluding the root and poll options; `unavailable` counts null responses. Missing reported counts remain unknown. Markdown uses the same snapshot and generated [Obsidian block identifiers](https://obsidian.md/help/links#Link%20to%20a%20block%20in%20a%20note).
+- Create the selected export directory when writing a completed story. Replace each named export through its own temporary file and rename; no additional filesystem checks are required.
+
+**Deployment and coordination**
+
+- Run from the existing Python 3.12+ checkout with standard-library dependencies. The first valid archive request migrates automatically; no service or scheduler changes are needed. Serialize commands sharing the catalog. Code rollback leaves archive tables and exports intact while the old collector continues using its v1 tables.
+- Align the [pinned PR #6 proposal](https://github.com/stanislavkozlovski/hn-search/blob/c3963bb752d278052beacd2a4b9dd654cc57fb85/docs/one-pagers/hn-topic-pipeline.md#L549-L551) before its implementation lands: it still describes explicit archive `--db`, pipeline-owned Markdown, and a null-root check that must use the settled `root.item` field. That consumer work remains in PR #6.
+
 # Legend (do not delete)
 
 Scope growth labels mean:
