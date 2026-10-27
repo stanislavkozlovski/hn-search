@@ -1,5 +1,6 @@
 from io import BytesIO
 import json
+from threading import Lock
 from urllib.parse import parse_qs, urlsplit
 
 from hn_search.clickhouse import Post
@@ -53,6 +54,31 @@ class ScriptedOpener:
         if isinstance(response, BaseException):
             raise response
         return BytesIO(response if isinstance(response, bytes) else result(response))
+
+
+class HNOpener:
+    """ID-keyed HN fixtures, including event-controlled concurrent responses."""
+
+    def __init__(self, responses=None):
+        self.responses = responses or {}
+        self.requests = []
+        self.timeouts = []
+        self.lock = Lock()
+
+    def __call__(self, url, *, timeout):
+        parts = urlsplit(url)
+        item_id = int(parts.path.removeprefix("/v0/item/").removesuffix(".json"))
+        if url != f"https://hacker-news.firebaseio.com/v0/item/{item_id}.json":
+            raise AssertionError(f"Unexpected HTTP destination: {url}")
+        with self.lock:
+            self.requests.append(item_id)
+            self.timeouts.append(timeout)
+        response = self.responses[item_id]
+        if callable(response):
+            response = response()
+        if isinstance(response, BaseException):
+            raise response
+        return BytesIO(response if isinstance(response, bytes) else json.dumps(response, ensure_ascii=False).encode())
 
 
 def start_history(conn, *, next_id=1, complete=False, through_id=100):
