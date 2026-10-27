@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-from hn_search.catalog import commit_page, open_catalog
+from hn_search.catalog import commit_page, migrate_archives, open_catalog
 from tests.helpers import post, start_history
 
 
@@ -46,6 +46,71 @@ class CatalogTests(unittest.TestCase):
             self.conn.execute("PRAGMA user_version = 7")
         self.reopen()
         self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 7)
+
+    def test_archive_migration_is_additive_repeatable_and_preserves_higher_versions(self):
+        start_history(self.conn, next_id=3)
+        commit_page(self.conn, [post(1), post(2)])
+        before = self.conn.execute("SELECT * FROM posts").fetchall()
+        migrate_archives(self.conn)
+        migrate_archives(self.conn)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(self.conn.execute("SELECT * FROM posts").fetchall(), before)
+        self.assertEqual(self.progress(), [(3, 0, 100)])
+        with self.conn:
+            self.conn.execute("PRAGMA user_version = 9")
+            self.conn.execute("INSERT INTO archives (root_id, started_at) VALUES (1, 10)")
+        migrate_archives(self.conn)
+        self.reopen()
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 9)
+        self.assertEqual(self.conn.execute("SELECT status FROM archives").fetchone()[0], "incomplete")
+        with self.conn:
+            self.conn.execute("UPDATE archives SET finished_at = 20")
+        self.assertEqual(self.conn.execute("SELECT status FROM archives").fetchone()[0], "complete")
+
+    def test_failed_migration_rolls_back_ddl_and_version(self):
+        def authorizer(action, arg1, arg2, database, trigger):
+            if action == sqlite3.SQLITE_CREATE_TABLE and arg1 == "archive_items":
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        self.conn.set_authorizer(authorizer)
+        with self.assertRaises(sqlite3.DatabaseError):
+            migrate_archives(self.conn)
+        self.conn.set_authorizer(None)
+        self.reopen()
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT name FROM sqlite_master WHERE name IN ('archives', 'archive_items')").fetchall(), [])
+
+    def test_old_collector_runs_against_migrated_catalog_without_changing_archives(self):
+        # Execute the exact merged v1 modules in isolation against this database.
+        start_history(self.conn, next_id=101, complete=True)
+        commit_page(self.conn, [post(1)])
+        migrate_archives(self.conn)
+        with self.conn:
+            self.conn.execute("INSERT INTO archives (root_id, started_at, finished_at) VALUES (1, 10, 20)")
+            self.conn.execute("INSERT INTO archive_items VALUES (1, 1, 'null', 15)")
+        self.conn.commit()
+        legacy = Path(self.directory.name) / "legacy"
+        package = legacy / "hn_search"
+        package.mkdir(parents=True)
+        for filename in ("__init__.py", "__main__.py", "catalog.py", "clickhouse.py", "collect.py"):
+            content = subprocess.check_output(["git", "show", f"64703b5:hn_search/{filename}"], cwd=ROOT)
+            (package / filename).write_bytes(content)
+        script = """
+from io import BytesIO
+import sys
+from hn_search.__main__ import main
+def opener(url, *, timeout):
+    return BytesIO(b'{"data": [], "rows": 0}')
+main(['--db', sys.argv[1], 'collect'], opener=opener, clock=lambda: 1800000000)
+"""
+        run = subprocess.run([sys.executable, "-c", script, str(self.path)], cwd=legacy, capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.reopen()
+        self.assertEqual(self.progress(), [(101, 1, 100)])
+        self.assertEqual(self.conn.execute("SELECT * FROM archive_items").fetchall(), [(1, 1, "null", 15)])
+        self.assertEqual(self.conn.execute("SELECT finished_at FROM archives").fetchone()[0], 20)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 2)
 
     def test_mapping_preserves_html_unicode_empty_strings_and_generates_hn_link(self):
         record = post(42, title="雪 & <b>café</b>", url="", text="<p>hi &#39; \n🙂</p>")

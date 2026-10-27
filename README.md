@@ -2,14 +2,15 @@
 
 - **Old posts:** `collect` saves metadata for nondeleted top-level HN posts with at least five reported comments from ClickHouse into SQLite, resuming interrupted imports.
 - **New posts:** Each run then rescans posts created in the preceding five days, adds newly eligible posts, and refreshes eligible saved metadata. Posts that stop qualifying keep their last eligible snapshot; there is no catch-up outside that window.
-- **Use:** Build a local catalog and inspect collection progress now; topic searches, comment downloads, and AI reports with linked arguments come later, as described in the [one-pager](docs/one-pagers/hn-topic-research.md).
+- **Discussions:** `archive` downloads catalog stories and their comments into SQLite with reusable JSON and Markdown exports.
+- **Use:** Build a local catalog and save discussions now; topic searches and AI reports with linked arguments come later, as described in the [one-pager](docs/one-pagers/hn-topic-research.md).
 
 ## Usage and collection details
 
 Collect a local SQLite catalog of Hacker News post metadata from ClickHouse's
 [`hackernews_history` mirror](https://play.clickhouse.com/). This implements the
 [metadata collection design](https://github.com/stanislavkozlovski/hn-search/pull/1).
-Comments, article bodies, search, and AI reports are deferred.
+Use `archive` below to save comments. Article bodies, search, and AI reports are deferred.
 
 Use Python 3.12+ with SQLite 3.31+ from the repository root. No dependencies or
 package installation are needed:
@@ -61,8 +62,7 @@ from the ID on read. Source strings, including HTML, Unicode, and empty URL or
 text, are preserved. Collection progress holds one historical row; it is not a
 run log. Expect roughly 0.5–1 KiB per post (about 323–646 MiB for 661,233 posts),
 plus journals and temporary space; these are estimates, not limits. Keep the
-SQLite file and journal out of Git. Future schema changes need their own
-migration design.
+SQLite file and journal out of Git.
 
 Install the feed dependency before running the complete offline suite:
 
@@ -70,6 +70,67 @@ Install the feed dependency before running the complete offline suite:
 python3 -m pip install -r requirements.txt
 python3 -m unittest discover -s tests
 ```
+
+## Comment archives
+
+Download discussions for stories already present in the metadata catalog:
+
+```bash
+python3 -m hn_search archive 4517440 126809
+python3 -m hn_search --db hn.sqlite3 archive --export-dir exports 4517440
+```
+
+`archive` defaults to `hn.sqlite3` and `exports/`, relative to the current working
+directory. `collect` and `feed` still require an explicit top-level `--db`.
+Repeated IDs are ignored. Every requested ID must exist in `posts`; missing IDs
+are all reported before any archive migration or HTTP request.
+
+The downloader saves the official HN API's root and observed reply tree, including
+poll choices and their vote counts. Original JSON fields, HTML, reply relationships,
+and UTC retrieval times remain in SQLite. Deleted, flagged, and unavailable items
+stay visible; their obtainable children are followed. A mismatch with HN's reported
+comment count does not prevent completion. This is an observation interval, not
+an atomic historical snapshot: replies added behind a saved parent are not fetched.
+
+Up to eight stories download concurrently, with one item request per story and
+one SQLite writer. Each response commits before that story's next request.
+There is a 30-second blocking-operation HTTP timeout, with no automatic retries
+or fixed pacing. On a request failure, dispatch stops, successful requests already
+running are saved, and independently completed stories still receive exports.
+Unadmitted stories remain untouched. Rerun the same command after a failure or
+interruption to fetch only missing items.
+
+Only complete stories get `<id>.json` and `<id>.md`. JSON contains the unchanged
+API value under each node's `item`, ordered `replies`, HN links, retrieval times,
+poll options, observation timestamps, and counts. `comments` counts non-null reply
+items including deleted/flagged placeholders, excluding the root and poll options;
+`unavailable` counts null responses and `saved_items` includes them. The Markdown
+opens with the saved root and metadata, then nests comments with HN links and
+Obsidian `^c<ID>` anchors. Source HTML stays unchanged in SQLite and JSON while
+Markdown renders paragraphs, emphasis, code, links, and entities.
+
+```text
+archive root=4517440 status=complete comments=5 unavailable=0 reported_descendants=5 json=exports/4517440.json markdown=exports/4517440.md
+archive root=4517440 status=incomplete comments=3 pending=1
+```
+
+Each file is replaced through its own temporary file and rename. Success is printed
+only after both writes. If an export fails, the archive stays complete; rerunning
+rebuilds both files with zero HN requests and prints `reused=true`. Every completed
+archive is reused forever, including recent stories; there is no refresh command.
+Request/export failures exit 1; malformed arguments exit 2.
+
+The first valid archive request atomically adds `archives` and `archive_items` and
+raises schema v1 to v2 without changing posts or collection progress. Higher
+versions are preserved. Rolling code back leaves these tables intact and unused
+by the old collector. Serialize `archive`, `collect`, and other commands sharing
+the catalog; overlapping writers can fail with SQLite locking errors.
+
+Library callers use `hn_search.archive.archive(conn, roots, export_dir)` for a
+batch or `archive_story(conn, root, export_dir)` for one story. Both require explicit
+paths and a catalog connection owned by the calling thread. Failures propagate
+after running responses drain; callers choose their own continuation policy.
+Downloads require only the Python standard library.
 
 ## Telegram feed
 

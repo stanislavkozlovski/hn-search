@@ -53,3 +53,25 @@ def commit_page(conn, posts, *, next_id=None, complete=False):
                 "UPDATE collection_progress SET next_id = ?, complete = ?",
                 (next_id, complete),
             )
+
+
+def migrate_archives(conn):
+    """Add archive storage atomically without changing the metadata collector."""
+    with conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS archives (
+            root_id INTEGER PRIMARY KEY,
+            status TEXT GENERATED ALWAYS AS (
+                CASE WHEN finished_at IS NULL THEN 'incomplete' ELSE 'complete' END
+            ) VIRTUAL,
+            started_at INTEGER NOT NULL,
+            finished_at INTEGER
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS archive_items (
+            root_id INTEGER NOT NULL,
+            item_id INTEGER NOT NULL,
+            item_json TEXT NOT NULL,
+            retrieved_at INTEGER NOT NULL,
+            PRIMARY KEY (root_id, item_id)
+        )""")
+        if conn.execute("PRAGMA user_version").fetchone()[0] < 2:
+            conn.execute("PRAGMA user_version = 2")
