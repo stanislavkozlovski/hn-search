@@ -177,15 +177,14 @@ def archive(conn, requested_ids, export_dir):
             if first_error is None:
                 for root, pending in active.items():
                     if root not in busy and pending:
-                        item_id = pending.popleft()
+                        item_id = pending[0]
                         future = pool.submit(fetch_one, item_id)  # 4. HTTP only
                         in_flight[future] = (root, item_id)
 
             if first_error is not None:
                 for future in list(in_flight):
                     if future.cancel():                     # cancel fetches not yet started
-                        root, item_id = in_flight.pop(future)
-                        active[root].appendleft(item_id)
+                        in_flight.pop(future)
 
             if not in_flight:
                 if first_error is not None:
@@ -199,9 +198,9 @@ def archive(conn, requested_ids, export_dir):
                     item, retrieved_at = future.result()
                 except Exception as error:                  # 5. fetch or JSON failure
                     first_error = first_error or error
-                    active[root].appendleft(item_id)        # failed ID stays pending
                 else:
                     save_item(conn, root, item_id, item, retrieved_at=retrieved_at)  # commit
+                    active[root].popleft()
                     for child in children(root, item_id, item):
                         if not item_saved(conn, root, child) and child not in active[root]:
                             active[root].append(child)      # saved lists survive shutdown
