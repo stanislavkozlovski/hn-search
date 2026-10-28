@@ -6,6 +6,22 @@ from tests.research_helpers import node, snapshot
 
 
 class ThreadTests(unittest.TestCase):
+    def test_poll_option_replies_keep_their_parent_and_pack_as_root_subtrees(self):
+        replies = [node(cid, parent=2, text="Reply. " * 60) for cid in (20, 21, 22, 23)]
+        replies[0]["replies"] = [node(200, parent=20)]
+        tree = snapshot()
+        tree["root"]["item"]["type"] = "poll"
+        tree["poll_options"] = [node(2, type="pollopt", poll=1, score=4,
+                                     text="First choice", replies=replies)]
+        prompt = story_prompt(tree)
+        self.assertIn('<comment id="20" parent="2"', prompt)
+        self.assertIn('<comment id="200" parent="20"', prompt)
+        parts = split_story(tree, 400)
+        self.assertGreater(len(parts), 1)
+        self.assertLess(len(parts), 5)
+        self.assertEqual([cid for part in parts for cid in part.comment_ids], [1001, 20, 200, 21, 22, 23])
+        self.assertTrue(all(part.size <= 400 for part in parts))
+
     def test_prompt_markers_only_identify_citable_source_comments(self):
         missing = node(1004)
         missing["item"] = None

@@ -145,7 +145,7 @@ def split_story(snapshot, room):
         cid, alone = tasks.pop()
         start, end = positions[cid], positions[cid] + 1 if alone else ends[cid]
         size = prefix[end] - prefix[start]
-        parent_available = parents[cid] == story_id or parents[cid] in owned or parents[cid] in context
+        parent_available = parents[cid] not in nodes or parents[cid] in owned or parents[cid] in context
         if owned and parent_available and fits(owned_chars + size, context):
             owned.extend(ids[start:end])
             owned_chars += size

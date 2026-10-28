@@ -115,10 +115,10 @@ def body(item, *, escape=True):
 
 
 def walk_comments(snapshot):
-    roots = list(snapshot["root"]["replies"])
+    roots = [(node, 0, snapshot["root_id"]) for node in snapshot["root"]["replies"]]
     for option in snapshot.get("poll_options", []):
-        roots.extend(option["replies"])
-    stack = [(node, 0, snapshot["root_id"]) for node in reversed(roots)]
+        roots.extend((node, 0, option["id"]) for node in option["replies"])
+    stack = list(reversed(roots))
     while stack:
         node, depth, parent = stack.pop()
         yield node, depth, parent
