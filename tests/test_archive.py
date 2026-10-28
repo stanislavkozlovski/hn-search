@@ -428,12 +428,12 @@ class ArchiveCommandTests(unittest.TestCase):
             os.chdir(self.directory.name)
             Path("hn.sqlite3").write_bytes(self.path.read_bytes())
             with redirect_stdout(StringIO()):
-                self.assertEqual(main(["archive", "1"], opener=HNOpener({1: {"id": 1}}), clock=lambda: NOW), 0)
+                self.assertEqual(main(["--db", "hn.sqlite3", "archive", "1"], opener=HNOpener({1: {"id": 1}}), clock=lambda: NOW), 0)
                 self.assertEqual(main(["--db", str(self.path), "archive", "--export-dir", "selected", "2", "2"], opener=HNOpener({2: {"id": 2}})), 0)
             self.assertTrue(Path("exports/1.json").exists())
             self.assertTrue(Path("exports/1.md").exists())
             self.assertTrue(Path("selected/2.md").exists())
-            for args in (["collect"], ["feed", "--config", "missing.toml"], ["archive"], ["archive", "nope"], ["archive", "1", "--bad"]):
+            for args in (["collect"], ["feed", "--config", "missing.toml"], ["archive"], ["archive", "1"], ["archive", "nope"], ["archive", "1", "--bad"]):
                 with self.subTest(args=args), patch("hn_search.__main__.open_catalog") as opened, redirect_stderr(StringIO()):
                     with self.assertRaises(SystemExit) as raised:
                         main(args, opener=HNOpener())
