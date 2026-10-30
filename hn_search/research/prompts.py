@@ -6,7 +6,8 @@ from dataclasses import dataclass
 
 from stan_ai_client import StructuredSchema
 
-from .ai import ANALYSIS_FIELDS, CONTEXT_WINDOWS, EFFORTS
+from .ai import CONTEXT_WINDOWS, DEFAULT_SETTINGS, EFFORTS
+from .render import ANALYSIS_FIELDS
 from .threads import unit_identity
 
 
@@ -34,6 +35,11 @@ LIST_RULE = (
     "geographic conditions, lived experiences, and unresolved disagreements. Each list item "
     "must include at least one [c<ID>] citation. Empty lists are allowed. Preserve disagreement "
     "and contextual limits; do not claim population-wide consensus."
+)
+MANIFEST_RULE = (
+    "The final source-unit manifest lists every required result identity. Include each "
+    "listed identity exactly once, even for a short or off-topic story. Before returning, "
+    "compare your complete result list with that manifest and fill any missing result."
 )
 
 
@@ -84,7 +90,7 @@ PROMPTS = {
         "still returns the revised table; the CLI will show it before accepting approval. "
         "Use only the offered models and efforts. Read the resent exchange for context.",
         object_schema({"approved": {"type": "boolean"},
-                       **{stage: SETTING for stage in ("keywords", "classification", "thread_analysis", "report")},
+                       **{stage: SETTING for stage in DEFAULT_SETTINGS},
                        "note": STRING}),
     ),
     "keywords": prompt(
@@ -109,10 +115,7 @@ PROMPTS = {
         "question. Return exactly one result per (story_id, part), with a reusable discussion "
         "description and tags. Summarize discussion topics without naming individual "
         "commenters, quoting comments, or adding citation markers. A part's context is "
-        "ancestry, not additional owned comments. "
-        "The final source-unit manifest lists every required result identity. Include each "
-        "listed identity exactly once, even for a short or off-topic story. Before returning, "
-        "compare your complete result list with that manifest and fill any missing result.",
+        "ancestry, not additional owned comments. " + MANIFEST_RULE,
         object_schema({"stories": array_schema(object_schema({
             "story_id": INTEGER, "part": INTEGER, "description": STRING, "tags": array_schema(STRING),
         }))}),
@@ -127,9 +130,7 @@ PROMPTS = {
         "or citation markers; put supporting IDs only in comment_ids. "
         "Prefer uncertain rather than irrelevant when unsure, to prioritize recall. "
         "Irrelevant results may have an empty comment_ids list. Assess comments, not just titles. "
-        "The final source-unit manifest lists every required result identity. Include each "
-        "listed identity exactly once, even for a short or off-topic story. Before returning, "
-        "compare your complete result list with that manifest and fill any missing result.",
+        + MANIFEST_RULE,
         object_schema({"stories": array_schema(object_schema({
             "story_id": INTEGER, "part": INTEGER,
             "verdict": {"type": "string", "enum": ["relevant", "uncertain", "irrelevant"]},

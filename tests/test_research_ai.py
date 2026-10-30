@@ -186,6 +186,26 @@ class StructuredCallTests(unittest.TestCase):
             for call in calls:
                 self.assertLessEqual(estimate_tokens(story_call(name, "Question?", call)), budget)
 
+    def test_saved_citations_are_markers_plus_verdict_comment_ids(self):
+        from hn_search.research.ai import cited_ids
+
+        self.assertEqual(cited_ids({"reasons": "Rates [c5]", "tags": ["[c9]"], "comment_ids": [7]}), {5, 7, 9})
+        self.assertEqual(cited_ids("Evidence [c11] and [c12]"), {11, 12})
+
+    def test_boundary_budget_uses_the_shared_estimate(self):
+        from hn_search.research.ai import input_limit, run_stage
+        from tests.research_helpers import FakeClient
+
+        client = FakeClient()
+        client.fail = lambda call: True
+        limit = input_limit("gpt-6-luna")
+        # Exactly the limit reaches the client; one more character fails before any call.
+        for chars, error in ((limit * 4, RuntimeError), (limit * 4 + 1, ValueError)):
+            with self.subTest(chars=chars), self.assertRaises(error):
+                run_stage(client, "settings", "x" * chars, cwd="/work/run", model="gpt-6-luna",
+                          effort="medium", stderr=io.StringIO())
+        self.assertEqual(len(client.calls), 1)
+
     def test_missing_repeated_extra_foreign_and_deleted_units_fail_the_call(self):
         from hn_search.research.ai import run_stage
         from hn_search.research.prompts import story_call

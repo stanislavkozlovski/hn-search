@@ -2,6 +2,7 @@ import re
 import unittest
 from types import SimpleNamespace
 
+from hn_search.research.render import comment_refs
 from hn_search.research.threads import combine_verdicts, pack, split_story
 from tests.research_helpers import node, snapshot
 
@@ -33,6 +34,8 @@ class ThreadTests(unittest.TestCase):
         self.assertIn("Source citation: [c1001]", whole.text)
         for cid in (1002, 1003, 1004):
             self.assertNotIn(f"[c{cid}]", whole.text)
+        # Validation allows, and Markdown links, exactly the comments the prompt marks.
+        self.assertEqual({int(cid) for cid in re.findall(r"\[c(\d+)\]", whole.text)}, set(comment_refs(tree)))
 
     def test_top_level_and_nested_parts_keep_context_and_exact_coverage(self):
         children = [node(30 + i, parent=20, text="Reply. " * 35) for i in range(6)]

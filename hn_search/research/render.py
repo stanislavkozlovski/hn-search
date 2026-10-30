@@ -9,8 +9,8 @@ from hn_search.markup import html_to_markdown as _html_to_markdown
 
 
 CITATION = re.compile(r"\[c([0-9]+)\]")
-FIELDS = ("arguments", "counterarguments", "assumptions", "conditions",
-          "lived_experiences", "unresolved_disagreements")
+ANALYSIS_FIELDS = ("arguments", "counterarguments", "assumptions", "conditions",
+                   "lived_experiences", "unresolved_disagreements")
 
 
 def escape_text(text):
@@ -70,11 +70,14 @@ def walk_comments(snapshot):
         stack.extend((child, depth + 1, node["id"]) for child in reversed(node["replies"]))
 
 
+def citable(item):
+    """Prompts mark, replies cite, and Markdown links exactly these saved comments."""
+    return item is not None and item.get("type") == "comment" and not item.get("deleted")
+
+
 def comment_refs(snapshot):
     return {node["id"]: (snapshot["root_id"], node["item"].get("by", "unknown"))
-            for node, _, _ in walk_comments(snapshot)
-            if node["item"] is not None and node["item"].get("type") == "comment"
-            and not node["item"].get("deleted")}
+            for node, _, _ in walk_comments(snapshot) if citable(node["item"])}
 
 
 def render_citations(text, refs, *, report=False):
@@ -142,7 +145,7 @@ def analysis_lists(results, refs, *, report=False):
     for index, result in enumerate(results, 1):
         if len(results) > 1:
             lines.extend([f"## Part {index}", ""])
-        for field in FIELDS:
+        for field in ANALYSIS_FIELDS:
             lines.extend([heading + field.replace("_", " ").capitalize(), ""])
             lines.extend("- " + render_citations(item, refs, report=report)
                          for item in result[field])

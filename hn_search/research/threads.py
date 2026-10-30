@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from .render import body, date, walk_comments
+from .render import body, citable, date, walk_comments
 
 
 UNITS_PER_CALL = 20
@@ -49,8 +49,7 @@ def _comment(node, parent):
     item = node["item"] or {}
     attrs = _attributes({"id": node["id"], "parent": parent, "by": item.get("by", "unknown"),
                          "time": date(item.get("time"))})
-    citation = (f"Source citation: [c{node['id']}]\n"
-                if item.get("type") == "comment" and not item.get("deleted") else "")
+    citation = f"Source citation: [c{node['id']}]\n" if citable(node["item"]) else ""
     return f"<comment {attrs}>\n{citation}{body(node['item'], escape=False)}\n</comment>\n"
 
 

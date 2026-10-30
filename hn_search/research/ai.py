@@ -4,7 +4,6 @@ import json
 import copy
 import os
 import platform
-import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +14,9 @@ from functools import lru_cache
 from pathlib import Path
 
 from stan_ai_client import CodexRunOptions, StructuredSchema
+
+from .render import ANALYSIS_FIELDS, CITATION
+from .threads import UNITS_PER_CALL, estimate_tokens
 
 
 # Verified against the installed Codex model catalog, 2026-10-27.
@@ -28,9 +30,6 @@ DEFAULT_SETTINGS = {
 }
 TIMEOUTS = {"settings": 300, "keywords": 300, "description": 1800, "verdict": 1800,
             "analysis": 7200, "synthesis": 7200, "folder_synthesis": 43_200}
-CITATION = re.compile(r"\[c([0-9]+)\]")
-ANALYSIS_FIELDS = ("arguments", "counterarguments", "assumptions", "conditions",
-                   "lived_experiences", "unresolved_disagreements")
 
 
 def input_limit(model):
@@ -104,20 +103,20 @@ class StageResult:
 
 
 def cited_ids(value):
-    """Collect citation markers in arbitrary structured text."""
+    """Collect what a result cites: [c<ID>] markers in any text plus its comment_ids."""
     if isinstance(value, str):
         return {int(match) for match in CITATION.findall(value)}
     if isinstance(value, dict):
-        return set().union(*(cited_ids(item) for item in value.values()), set())
+        return set(value.get("comment_ids", ())).union(*(cited_ids(item) for item in value.values()))
     if isinstance(value, list):
         return set().union(*(cited_ids(item) for item in value), set())
     return set()
 
 
-def check_citations(value, allowed):
+def check_citations(value, allowed, source="reply"):
     foreign = cited_ids(value) - set(allowed)
     if foreign:
-        raise ValueError(f"invalid comment citation c{min(foreign)}")
+        raise ValueError(f"{source} cites invalid comment c{min(foreign)}")
 
 
 def verdict_schema(schema, units, allowed_ids):
@@ -150,18 +149,13 @@ def validate_reply(name, output, units, allowed_ids):
         if expected != actual:
             raise ValueError(f"{name} units differ: expected {dict(expected)}, received {dict(actual)}")
         for item in output["stories"]:
-            allowed = allowed_ids[item["story_id"]]
-            check_citations(item, allowed)
-            if name == "verdict":
-                foreign = set(item["comment_ids"]) - set(allowed)
-                if foreign:
-                    raise ValueError(f"story {item['story_id']} invalid comment ID {min(foreign)}")
+            check_citations(item, allowed_ids[item["story_id"]], f"story {item['story_id']}")
     elif name in ("analysis", "synthesis", "folder_synthesis"):
         for field in ANALYSIS_FIELDS:
             for item in output[field]:
                 if not CITATION.search(item):
                     raise ValueError(f"{field} item has no comment citation: {item!r}")
-                check_citations(item, allowed_ids)
+        check_citations(output, allowed_ids)
 
 
 def run_stage(client, name, prompt, *, cwd, model, effort, units=(), allowed_ids=None,
@@ -176,11 +170,10 @@ def run_stage(client, name, prompt, *, cwd, model, effort, units=(), allowed_ids
     story_ids = sorted({unit.story_id for unit in units} | set(source_story_ids))
     start = time.monotonic()
     try:
-        # Keep the same conservative estimate used by splitting and packing.
-        if (len(prompt) + 3) // 4 > input_limit(model):
+        if estimate_tokens(prompt) > input_limit(model):
             raise ValueError(f"{name} prompt exceeds {model}'s input budget")
-        if len(units) > 20:
-            raise ValueError(f"{name} call exceeds 20 story units")
+        if len(units) > UNITS_PER_CALL:
+            raise ValueError(f"{name} call exceeds {UNITS_PER_CALL} story units")
         response = client.run_structured(
             prompt, schema=response_schema, options=run_options(name, cwd, model, effort),
             capture_usage=True,

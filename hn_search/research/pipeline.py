@@ -1,6 +1,5 @@
 """The sequential search → archive → classify → analyze → report workflow."""
 
-import importlib.metadata
 import io
 import shutil
 import sys
@@ -8,6 +7,7 @@ import tempfile
 import time
 from collections import Counter
 from contextlib import closing, redirect_stdout
+from dataclasses import dataclass
 from http.client import HTTPException
 from pathlib import Path
 
@@ -25,24 +25,29 @@ from .search import gate_lines, search
 from .threads import combine_verdicts, estimate_tokens, load_export, pack, split_story
 
 
-def _setting(name, settings):
-    return settings["classification" if name in ("description", "verdict") else "thread_analysis"]
+@dataclass(frozen=True)
+class _Stage:
+    """What a story stage's prompts, splits, packing, and reuse keys must share."""
+    name: str
+    setting: dict
+    question: str
+    room: int
 
 
-def _plans(snapshot, name, settings, question):
-    setting = _setting(name, settings)
-    question = "" if name == "description" else question
+def _stage(name, settings, question):
+    setting = settings["classification" if name in ("description", "verdict") else "thread_analysis"]
+    question = "" if name == "description" else question  # Descriptions carry across questions.
     room = input_limit(setting["model"]) - estimate_tokens(story_instructions(name, question))
-    return split_story(snapshot, room)
+    return _Stage(name, setting, question, room)
 
 
-def _key(unit, name, settings, question):
-    setting = _setting(name, settings)
-    return store.ResultKey(name, unit.story_id, unit.part, PROMPTS[name].version, setting["model"],
-                           setting["effort"], unit.input_key, "" if name == "description" else question)
+def _key(stage, unit):
+    return store.ResultKey(stage.name, unit.story_id, unit.part, PROMPTS[stage.name].version,
+                           stage.setting["model"], stage.setting["effort"], unit.input_key, stage.question)
 
 
 def _reused_stories(conn, matches, settings, question):
+    stages = [_stage(name, settings, question) for name in ("description", "verdict")]
     reused = []
     for story_id in matches.posts:
         row = conn.execute("SELECT status FROM archives WHERE root_id = ?", (story_id,)).fetchone()
@@ -50,25 +55,25 @@ def _reused_stories(conn, matches, settings, question):
             continue
         snapshot = _snapshot(conn, story_id)
         if snapshot["root"]["item"] is not None and all(
-            store.lookup(conn, _key(unit, name, settings, question)) is not None
-            for name in ("description", "verdict")
-            for unit in _plans(snapshot, name, settings, question)
+            store.lookup(conn, _key(stage, unit)) is not None
+            for stage in stages
+            for unit in split_story(snapshot, stage.room)
         ):
             reused.append(story_id)
     return reused
 
 
 def _story_stage(conn, run_id, snapshots, name, settings, question, client, cwd, progress, clock):
-    plans = {sid: _plans(snapshot, name, settings, question) for sid, snapshot in snapshots.items()}
+    stage = _stage(name, settings, question)
+    plans = {sid: split_story(snapshot, stage.room) for sid, snapshot in snapshots.items()}
     units = [unit for story in plans.values() for unit in story]
-    keys = {(unit.story_id, unit.part): _key(unit, name, settings, question) for unit in units}
+    keys = {(unit.story_id, unit.part): _key(stage, unit) for unit in units}
     results = {identity: saved for identity, key in keys.items() if (saved := store.lookup(conn, key)) is not None}
     missing = [unit for unit in units if (unit.story_id, unit.part) not in results]
-    setting = _setting(name, settings)
-    call_question = "" if name == "description" else question
-    room = input_limit(setting["model"]) - estimate_tokens(story_instructions(name, call_question))
-    calls = [[unit] for unit in missing] if name == "analysis" else pack(missing, room)
-    stage = "analyze" if name == "analysis" else "classify"
+    setting = stage.setting
+    calls = [[unit] for unit in missing] if name == "analysis" else pack(missing, stage.room)
+    phase = "analyze" if name == "analysis" else "classify"
+    allowed = {sid: set(comment_refs(snapshot)) for sid, snapshot in snapshots.items()}
     completed = set()
 
     def complete_rows(available, story_ids):
@@ -99,15 +104,14 @@ def _story_stage(conn, run_id, snapshots, name, settings, question, client, cwd,
             tallies = Counter(combine_verdicts([results[(sid, unit.part)].result for unit in plans[sid]])["verdict"]
                               for sid in completed)
             summary += " · " + " · ".join(f"{tallies[value]} {value}" for value in ("relevant", "uncertain", "irrelevant"))
-        progress.update(stage, summary if name != "description" else "descriptions " + summary)
+        progress.update(phase, summary if name != "description" else "descriptions " + summary)
 
     missing_ids = {(unit.story_id, unit.part) for unit in missing}
     show_completed()
     for index, call in enumerate(calls, 1):
         label = f"{name} call {index}/{len(calls)} · {len(call)} units · {setting['model']} {setting['effort']}"
-        allowed = {sid: set(comment_refs(snapshot)) for sid, snapshot in snapshots.items()}
-        with progress.busy(stage, label):
-            reply = run_stage(client, name, story_call(name, call_question, call), cwd=cwd,
+        with progress.busy(phase, label):
+            reply = run_stage(client, name, story_call(name, stage.question, call), cwd=cwd,
                               model=setting["model"], effort=setting["effort"], units=call,
                               allowed_ids=allowed[call[0].story_id] if name == "analysis" else allowed,
                               call_label=f"{name} call {index}/{len(calls)}", before_failure=progress.close)
@@ -115,10 +119,7 @@ def _story_stage(conn, run_id, snapshots, name, settings, question, client, cwd,
             (call[0].story_id, call[0].part): reply.output}
         pending = {identity: store.SavedResult(0, keys[identity], result) for identity, result in output.items()}
         statuses = complete_rows(results | pending, {unit.story_id for unit in call})
-        rows = []
-        for identity, result in output.items():
-            citations = cited_ids(result) | set(result.get("comment_ids", []))
-            rows.append((keys[identity], result, citations))
+        rows = [(keys[identity], result, cited_ids(result)) for identity, result in output.items()]
         for saved in store.save_call(conn, run_id, rows, reply.usage, now=clock(), statuses=statuses):
             results[(saved.key.story_id, saved.key.part)] = saved
         show_completed()
@@ -162,8 +163,6 @@ def _synthesize(conn, run_id, question, settings, stories, client, cwd, folder, 
 
 
 def run_research(conn, out_dir, *, client, archive_story, ask, stream, clock):
-    if store.next_folder(conn, out_dir).exists():
-        raise FileExistsError(f"research run folder already exists: {store.next_folder(conn, out_dir)}")
     progress = Progress(stream, clock)
     try:
         with tempfile.TemporaryDirectory(prefix="hn-research-") as temporary:
@@ -180,8 +179,7 @@ def run_research(conn, out_dir, *, client, archive_story, ask, stream, clock):
                 with progress.busy("search", "searching the local catalog"):
                     matches = search(conn, approved.keywords)
                     reused = _reused_stories(conn, matches, settings, approved.question)
-                    room = input_limit(settings["classification"]["model"]) - estimate_tokens(
-                        story_instructions("verdict", approved.question))
+                    room = _stage("verdict", settings, approved.question).room
                     lines = gate_lines(matches, room=room, reused=reused)
                 progress.event("\n".join(lines))
                 reply = progress.ask(ask)
@@ -255,19 +253,12 @@ def run_research(conn, out_dir, *, client, archive_story, ask, stream, clock):
         progress.close()
 
 
-def main(db="hn.sqlite3", out="research"):
+def main(db, out):
+    """Run research after __main__ has checked the catalog file and the client version."""
     def usage_error(message):
         print("error: " + message, file=sys.stderr)
         raise SystemExit(2)
 
-    if not Path(db).is_file():
-        usage_error(f"no catalog at {db}; run collect first or pass --db")
-    try:
-        version = importlib.metadata.version("stan-ai-client")
-    except importlib.metadata.PackageNotFoundError:
-        usage_error("research requires stan-ai-client==0.1.19")
-    if version != "0.1.19":
-        usage_error(f"research requires stan-ai-client==0.1.19; installed {version}")
     with closing(open_catalog(db)) as conn:
         store.migrate(conn)
         if store.next_folder(conn, out).exists():
