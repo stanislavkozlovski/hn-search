@@ -94,7 +94,7 @@ class RunTests(FeedCase):
         self.run_feed(window(hit(points=31)), now=NOW + 7200)
         self.assertEqual(len(self.calls()), 1)
 
-    def test_rejudgment_to_empty_cancels_pending_send_and_expired_pending_never_sends(self):
+    def test_rejudgment_to_empty_cancels_pending_send(self):
         with self.assertRaises(SystemExit):
             self.run_feed(window(hit()), FORBIDDEN)
         self.run_feed(window(hit(title="Unrelated news")), now=NOW + 3600)
@@ -102,6 +102,15 @@ class RunTests(FeedCase):
         with closing(store.open_feed(self.path)) as conn:
             self.assertEqual(conn.execute("SELECT count(*) FROM messages").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT categories FROM decisions").fetchone()[0], "[]")
+
+    def test_pending_matches_survive_search_expiry_and_restart(self):
+        with self.assertRaises(SystemExit):
+            self.run_feed(window(hit()), FORBIDDEN)
+        opener = self.run_feed(window(), sent(), now=NOW + 36000)
+        self.assertIn("Agent frameworks", opener.requests[1]["payload"]["text"])
+        with closing(store.open_feed(self.path)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM messages").fetchone()[0], 1)
+            self.assertEqual(store.pending_lines(conn, self.settings().lenses), [])
 
     def test_ten_shown_values_cap_and_unchanged_score_no_request(self):
         self.run_feed(window(hit()), sent())

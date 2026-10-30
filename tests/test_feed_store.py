@@ -29,9 +29,32 @@ class StoreTests(FeedCase):
             with self.assertRaises(sqlite3.IntegrityError), conn:
                 conn.execute("INSERT INTO observations VALUES (1, 1, 6)")
             with conn:
-                conn.execute("PRAGMA user_version = 2")
-        with self.assertRaisesRegex(ValueError, "user_version: 2"):
+                conn.execute("PRAGMA user_version = 4")
+        with self.assertRaisesRegex(ValueError, "user_version: 4"):
             store.open_feed(self.path)
+
+    def test_v1_and_v2_migrations_preserve_deliveries_and_remove_old_throttle(self):
+        for version in (1, 2):
+            path = self.directory / f"v{version}.sqlite3"
+            with self.subTest(version=version), closing(store.open_feed(path)) as conn:
+                with conn:
+                    conn.execute("ALTER TABLE messages DROP COLUMN deleted_at")
+                    conn.execute("ALTER TABLE messages DROP COLUMN superseded_by")
+                    conn.execute(f"PRAGMA user_version = {version}")
+                    conn.execute("""INSERT INTO messages (bot_token_env, chat_id, telegram_message_id, sent_at)
+                        VALUES ('HN_FEED_TEST_TOKEN', 123, 812, ?)""", (NOW,))
+                    if version == 2:
+                        conn.execute("""CREATE TABLE send_attempts (id INTEGER PRIMARY KEY,
+                            bot_token_env TEXT, chat_id INTEGER, attempted_at INTEGER)""")
+            with closing(store.open_feed(path)) as conn:
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
+                row = dict(conn.execute("SELECT * FROM messages").fetchone())
+                self.assertEqual((row["telegram_message_id"], row["sent_at"]), (812, NOW))
+                self.assertIsNone(row["superseded_by"])
+                self.assertIsNone(row["deleted_at"])
+                self.assertIsNone(conn.execute("SELECT 1 FROM sqlite_master WHERE name='send_attempts'").fetchone())
+            with closing(store.open_feed(path)) as conn:
+                self.assertEqual(conn.execute("SELECT count(*) FROM messages").fetchone()[0], 1)
 
     def test_observations_keep_discovery_and_created_at_and_never_prune(self):
         story = Story(1, "Agents", None, NOW - 7200, 6)

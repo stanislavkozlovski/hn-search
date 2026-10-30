@@ -39,13 +39,39 @@ class TelegramTests(FeedCase):
     def test_send_payload_and_not_modified_http_400_count_as_success(self):
         opener = RecordingOpener(sent())
         self.assertEqual(telegram.send_message(self.message(), self.settings().tokens, opener=opener), 812)
-        self.assertEqual(opener.requests[0]["payload"], {"chat_id": 123, "text": telegram.render(self.message()), "parse_mode": "HTML"})
+        self.assertEqual(opener.requests[0]["payload"], {
+            "chat_id": 123, "text": telegram.render(self.message()), "parse_mode": "HTML",
+            "link_preview_options": {"is_disabled": True},
+        })
         self.assertEqual(opener.requests[0]["timeout"], 30)
         body = {"ok": False, "error_code": 400, "description": "Bad Request: message is not modified: unchanged"}
         error = HTTPError(f"https://api.telegram.org/bot{TOKEN}/editMessageText", 400, "bad", {}, BytesIO(json.dumps(body).encode()))
         opener = RecordingOpener(error)
         telegram.edit_message(self.message(telegram_message_id=812), self.settings().tokens, opener=opener)
         self.assertEqual(opener.requests[0]["payload"]["message_id"], 812)
+        self.assertEqual(opener.requests[0]["payload"]["link_preview_options"], {"is_disabled": True})
+
+    def test_stories_have_blank_lines_and_dashed_separators(self):
+        message = self.message()
+        second = replace(message.lines[0], story_id=2, title="Another agent")
+        rendered = telegram.render(replace(message, lines=(*message.lines, second)))
+        self.assertIn("2 new matches\n\n", rendered)
+        self.assertEqual(rendered.count("\n\n--------------------\n\n"), 1)
+        self.assertIn("item?id=1", rendered)
+        self.assertIn("item?id=2", rendered)
+
+    def test_delete_payload_and_missing_message_retry(self):
+        message = self.message(telegram_message_id=812)
+        for response in ({"ok": True, "result": True},
+                         {"ok": False, "error_code": 400, "description": "Bad Request: message to delete not found"}):
+            opener = RecordingOpener(response)
+            telegram.delete_message(message, self.settings().tokens, opener=opener)
+            self.assertEqual(opener.requests[0]["payload"], {"chat_id": 123, "message_id": 812})
+            self.assertTrue(opener.requests[0]["url"].endswith("/deleteMessage"))
+        for response in ({"ok": True, "result": False},
+                         {"ok": False, "error_code": 400, "description": "Bad Request: message can't be deleted"}):
+            with self.assertRaises(telegram.TelegramError):
+                telegram.delete_message(message, self.settings().tokens, opener=RecordingOpener(response))
 
     def test_api_and_transport_errors_never_expose_token_or_request_url(self):
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
