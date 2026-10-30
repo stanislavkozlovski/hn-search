@@ -144,27 +144,23 @@ def pending_lines(conn, lenses):
         rows = conn.execute("""SELECT s.id, s.title, s.url, d.categories FROM stories s
             JOIN decisions d ON d.story_id = s.id
             WHERE d.lens = ? AND d.title = s.title AND d.url IS s.url AND d.categories_digest = ?
+              AND d.categories != '[]'
               AND NOT EXISTS (SELECT 1 FROM message_lines ml WHERE ml.lens = d.lens AND ml.story_id = s.id)
             ORDER BY s.first_seen_at, s.id""", (lens.name, lens.categories_digest))
         for row in rows:
-            tags = tuple(json.loads(row["categories"]))
-            if not tags:
-                continue
             destinations.setdefault(destination, []).append(Line(
-                lens.name, row["id"], tags, row["title"], row["url"], _points(conn, row["id"]),
+                lens.name, row["id"], tuple(json.loads(row["categories"])), row["title"], row["url"],
+                _points(conn, row["id"]),
             ))
     return [Message(bot, chat, tuple(lines)) for (bot, chat), lines in destinations.items()]
 
 
-def record_message(conn, message, telegram_message_id, now):
-    with conn:
-        message_id = conn.execute("""INSERT INTO messages (bot_token_env, chat_id, telegram_message_id, sent_at)
-            VALUES (?, ?, ?, ?)""", (message.bot_token_env, message.chat_id, telegram_message_id, now)).lastrowid
-        for position, line in enumerate(message.lines):
-            conn.execute("INSERT INTO message_lines VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
-                message_id, position, line.lens, line.story_id, json.dumps(line.tags),
-                line.title, line.url, json.dumps(line.shown_points),
-            ))
+def _save_lines(conn, message_id, lines):
+    for position, line in enumerate(lines):
+        conn.execute("INSERT INTO message_lines VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
+            message_id, position, line.lens, line.story_id, json.dumps(line.tags),
+            line.title, line.url, json.dumps(line.shown_points),
+        ))
 
 
 def _saved_lines(conn, message_id):
@@ -173,16 +169,27 @@ def _saved_lines(conn, message_id):
                  for row in conn.execute("SELECT * FROM message_lines WHERE message_id = ? ORDER BY position", (message_id,)))
 
 
-def recent_messages(conn, lenses, now):
+def _tracked(conn, lenses, condition, *params):
+    """Yield saved messages for configured bots and chats only; rows are fetched before callers commit."""
     destinations = {(lens.bot_token_env, lens.chat_id) for lens in lenses}
+    for row in conn.execute(f"SELECT * FROM messages WHERE {condition}", params).fetchall():
+        if (row["bot_token_env"], row["chat_id"]) in destinations:
+            yield Message(row["bot_token_env"], row["chat_id"], _saved_lines(conn, row["id"]),
+                          row["telegram_message_id"], row["id"])
+
+
+def record_message(conn, message, telegram_message_id, now):
+    with conn:
+        message_id = conn.execute("""INSERT INTO messages (bot_token_env, chat_id, telegram_message_id, sent_at)
+            VALUES (?, ?, ?, ?)""", (message.bot_token_env, message.chat_id, telegram_message_id, now)).lastrowid
+        _save_lines(conn, message_id, message.lines)
+
+
+def recent_messages(conn, lenses, now):
     grouped = {}
-    for row in conn.execute("""SELECT * FROM messages WHERE superseded_by IS NULL
-        AND sent_at > ? ORDER BY sent_at, id""", (now - COMPACTION_WINDOW_SECONDS,)):
-        destination = (row["bot_token_env"], row["chat_id"])
-        if destination in destinations:
-            grouped.setdefault(destination, []).append(Message(
-                *destination, _saved_lines(conn, row["id"]), row["telegram_message_id"], row["id"],
-            ))
+    for message in _tracked(conn, lenses, "superseded_by IS NULL AND sent_at > ? ORDER BY sent_at, id",
+                            now - COMPACTION_WINDOW_SECONDS):
+        grouped.setdefault((message.bot_token_env, message.chat_id), []).append(message)
     return grouped.values()
 
 
@@ -197,20 +204,11 @@ def record_compaction(conn, originals, replacements):
                 conn.execute("UPDATE messages SET superseded_by = ? WHERE id = ?",
                              (owners[(message.lines[0].lens, message.lines[0].story_id)], message.id))
         for message in replacements:
-            for position, line in enumerate(message.lines):
-                conn.execute("INSERT INTO message_lines VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
-                    message.id, position, line.lens, line.story_id, json.dumps(line.tags),
-                    line.title, line.url, json.dumps(line.shown_points),
-                ))
+            _save_lines(conn, message.id, message.lines)
 
 
 def messages_to_delete(conn, lenses):
-    destinations = {(lens.bot_token_env, lens.chat_id) for lens in lenses}
-    rows = conn.execute("""SELECT * FROM messages WHERE superseded_by IS NOT NULL
-        AND deleted_at IS NULL ORDER BY id""").fetchall()
-    for row in rows:
-        if (row["bot_token_env"], row["chat_id"]) in destinations:
-            yield Message(row["bot_token_env"], row["chat_id"], (), row["telegram_message_id"], row["id"])
+    return _tracked(conn, lenses, "superseded_by IS NOT NULL AND deleted_at IS NULL ORDER BY id")
 
 
 def record_delete(conn, message, now):
@@ -219,20 +217,17 @@ def record_delete(conn, message, now):
 
 
 def messages_to_edit(conn, lenses, stories):
-    destinations = {(lens.bot_token_env, lens.chat_id) for lens in lenses}
     current = {story.id: story.points for story in stories}
-    for row in conn.execute("SELECT * FROM messages ORDER BY id"):
-        if (row["bot_token_env"], row["chat_id"]) not in destinations:
-            continue
+    for message in _tracked(conn, lenses, "superseded_by IS NULL ORDER BY id"):
         lines, changed = [], False
-        for saved in _saved_lines(conn, row["id"]):
+        for saved in message.lines:
             points = saved.shown_points
             if saved.story_id in current and len(points) < MAX_SHOWN_POINTS and current[saved.story_id] != points[-1]:
                 points += (current[saved.story_id],)
                 changed = True
             lines.append(replace(saved, shown_points=points))
         if changed:
-            yield Message(row["bot_token_env"], row["chat_id"], tuple(lines), row["telegram_message_id"], row["id"])
+            yield replace(message, lines=tuple(lines))
 
 
 def record_edit(conn, message):

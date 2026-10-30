@@ -67,7 +67,7 @@ def compact_messages(conn, settings, *, opener, now):
         for original in originals:
             if replacements:
                 combined = replace(replacements[-1], lines=(*replacements[-1].lines, *original.lines))
-                if len(list(telegram.pack([combined]))) == 1:
+                if telegram.fits(combined):
                     replacements[-1] = combined
                     continue
             replacements.append(original)

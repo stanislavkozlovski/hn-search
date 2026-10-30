@@ -1,4 +1,5 @@
 from contextlib import closing, redirect_stdout
+from dataclasses import replace
 from io import StringIO
 import json
 import sqlite3
@@ -91,6 +92,8 @@ class CompactionTests(FeedCase):
             failures, opener = self.compact(conn, sent(), FORBIDDEN, *[DELETED] * 9)
             self.assertEqual(failures, 1)
             self.assertEqual(len(list(store.messages_to_delete(conn, self.settings().lenses))), 1)
+            other_chat = (replace(self.settings().lenses[0], chat_id=987654321),)
+            self.assertEqual(list(store.messages_to_delete(conn, other_chat)), [])
             self.assertEqual(conn.execute("SELECT count(*) FROM message_lines").fetchone()[0], 11)
         missing = {"ok": False, "error_code": 400, "description": "Bad Request: message to delete not found"}
         with closing(store.open_feed(self.path)) as conn:

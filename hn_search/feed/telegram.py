@@ -41,16 +41,19 @@ def render(message, *, worst_case=False, markup=True):
     return parts[0] + "\n\n" + "\n\n--------------------\n\n".join(parts[1:])
 
 
+def fits(message):
+    """Whether the message stays within Telegram's limit once every story shows ten five-digit scores."""
+    return utf16_units(render(message, worst_case=True, markup=False)) <= LIMIT
+
+
 def pack(messages):
     for message in messages:
         lines = []
         for line in message.lines:
-            candidate = replace(message, lines=tuple([*lines, line]))
-            if utf16_units(render(candidate, worst_case=True, markup=False)) > LIMIT:
+            if not fits(replace(message, lines=(*lines, line))):
                 if lines:
                     yield replace(message, lines=tuple(lines))
-                candidate = replace(message, lines=(line,))
-                if utf16_units(render(candidate, worst_case=True, markup=False)) > LIMIT:
+                if not fits(replace(message, lines=(line,))):
                     raise TelegramError(f"{message.bot_token_env}: story {line.story_id} exceeds Telegram's text limit")
                 lines = []
             lines.append(line)
