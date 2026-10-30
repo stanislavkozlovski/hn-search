@@ -1,13 +1,14 @@
 """Render complete archives from SQLite, preserving the saved API evidence."""
 
 from datetime import datetime, timezone
-from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
 import re
 import tempfile
 from urllib.parse import quote, urljoin, urlsplit
+
+from hn_search.markup import html_to_markdown as _html_to_markdown
 
 
 def load_items(conn, root):
@@ -119,70 +120,8 @@ def _link(url):
     return quote(target, safe="/:?#@!$&'*,;=+%-._~")
 
 
-def _code(text):
-    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
-    fence = "`" * max(3, longest + 1)
-    return f"\n\n{fence}\n{text.rstrip(chr(10))}\n{fence}\n\n"
-
-
-class _MarkdownParser(HTMLParser):
-    """Render only HN's markup: <p>, <i>, <pre><code>, and <a>; other tags keep their text."""
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.output = []
-        self.code = None
-        self.links = []
-
-    def paragraph_break(self):
-        if self.output and not self.output[-1].endswith("\n\n"):
-            self.output.append("\n\n")
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "pre":
-            self.code = []
-        elif self.code is not None:
-            return
-        elif tag == "p":
-            self.paragraph_break()
-        elif tag == "i":
-            self.output.append("*")
-        elif tag == "a":
-            href = dict(attrs).get("href")
-            target = _link(href) if href else None
-            self.links.append(target)
-            if target:
-                self.output.append("[")
-
-    def handle_endtag(self, tag):
-        if tag == "pre" and self.code is not None:
-            self.output.append(_code("".join(self.code)))
-            self.code = None
-        elif self.code is not None:
-            return
-        elif tag == "p":
-            self.paragraph_break()
-        elif tag == "i":
-            self.output.append("*")
-        elif tag == "a" and self.links:
-            target = self.links.pop()
-            if target:
-                self.output.append(f"]({target})")
-
-    def handle_data(self, data):
-        if self.code is not None:
-            self.code.append(data)
-        else:
-            self.output.append(_escape(data))
-
-
 def html_to_markdown(text):
-    parser = _MarkdownParser()
-    parser.feed(text)
-    parser.close()
-    if parser.code is not None:
-        parser.output.append(_code("".join(parser.code)))
-    return "".join(parser.output).strip()
+    return _html_to_markdown(text, escape_text=_escape, link_target=_link)
 
 
 def _date(value):

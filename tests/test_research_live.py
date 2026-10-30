@@ -82,7 +82,7 @@ def full_room_prompt(name):
     """Fill a production inline prompt to its exact four-character estimate."""
     from hn_search.research.ai import ANALYSIS_FIELDS, DEFAULT_SETTINGS, input_limit
     from hn_search.research.prompts import PROMPTS, story_call
-    from hn_search.research.threads import Unit, estimate_tokens, story_prompt
+    from hn_search.research.threads import estimate_tokens, split_story
     from tests.research_helpers import node, snapshot
 
     question = "Is buying a home better than renting?"
@@ -122,8 +122,8 @@ def full_room_prompt(name):
                                 # Keep whitespace trimming from changing size as boundaries move.
                                 text="Excerpt: " + segment[len(segment) * n // 8:len(segment) * (n + 1) // 8] + ".")
                            for n, cid in enumerate(ids)]
-                text = story_prompt(snapshot(sid, replies=replies))
-                units.append(Unit(sid, 0, text, ids, f"archive:{sid}@test"))
+                unit, = split_story(snapshot(sid, replies=replies), limit * 2)
+                units.append(unit)
                 allowed[sid] = set(ids)
             prompt = story_call(name, "" if name == "description" else question, units)
             return prompt, units, allowed[1] if name == "analysis" else allowed

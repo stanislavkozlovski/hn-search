@@ -3,8 +3,9 @@
 import html
 import re
 from datetime import datetime, timezone
-from html.parser import HTMLParser
 from urllib.parse import quote, urljoin, urlsplit
+
+from hn_search.markup import html_to_markdown as _html_to_markdown
 
 
 CITATION = re.compile(r"\[c([0-9]+)\]")
@@ -28,69 +29,13 @@ def safe_url(url):
         return None
 
 
-def code_block(text):
-    longest = max((len(run) for run in re.findall(r"\x60+", text)), default=0)
-    fence = chr(96) * max(3, longest + 1)
-    return f"\n\n{fence}\n{text.rstrip(chr(10))}\n{fence}\n\n"
-
-
-class _HTML(HTMLParser):
-    def __init__(self, escape):
-        super().__init__(convert_charrefs=True)
-        self.escape = escape
-        self.output = []
-        self.code = None
-        self.links = []
-
-    def paragraph(self):
-        if self.output and not self.output[-1].endswith("\n\n"):
-            self.output.append("\n\n")
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "pre":
-            self.code = []
-        elif self.code is not None:
-            return
-        elif tag == "p":
-            self.paragraph()
-        elif tag == "i":
-            self.output.append("*")
-        elif tag == "a":
-            href = dict(attrs).get("href")
-            target = safe_url(href) if href else None
-            self.links.append(target)
-            if target:
-                self.output.append("[")
-
-    def handle_endtag(self, tag):
-        if tag == "pre" and self.code is not None:
-            self.output.append(code_block("".join(self.code)))
-            self.code = None
-        elif self.code is not None:
-            return
-        elif tag == "p":
-            self.paragraph()
-        elif tag == "i":
-            self.output.append("*")
-        elif tag == "a" and self.links:
-            target = self.links.pop()
-            if target:
-                self.output.append(f"](<{target}>)")
-
-    def handle_data(self, data):
-        if self.code is not None:
-            self.code.append(data)
-        else:
-            self.output.append(escape_text(data) if self.escape else data)
-
-
 def html_to_markdown(source, escape=True):
-    parser = _HTML(escape)
-    parser.feed(source)
-    parser.close()
-    if parser.code is not None:
-        parser.output.append(code_block("".join(parser.code)))
-    return "".join(parser.output).strip()
+    def link_target(url):
+        target = safe_url(url)
+        return f"<{target}>" if target else None
+
+    return _html_to_markdown(source, escape_text=escape_text if escape else None,
+                             link_target=link_target)
 
 
 def date(value):

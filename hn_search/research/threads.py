@@ -66,16 +66,6 @@ def _header(snapshot, part):
     return header
 
 
-def story_prompt(snapshot, comment_ids=None, context_ids=(), *, part=0):
-    nodes = {node["id"]: (node, parent) for node, _, parent in walk_comments(snapshot)}
-    if comment_ids is None:
-        comment_ids = tuple(nodes)
-    result = _header(snapshot, part)
-    if context_ids:
-        result += "<context>\n" + "".join(_comment(*nodes[cid]) for cid in context_ids) + "</context>\n"
-    return result + "".join(_comment(*nodes[cid]) for cid in comment_ids) + "</hn_story>"
-
-
 def split_story(snapshot, room):
     """Keep every saved comment once as owned text; repeat only ancestry as context."""
     story_id = snapshot["root_id"]

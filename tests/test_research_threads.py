@@ -1,7 +1,8 @@
+import re
 import unittest
 from types import SimpleNamespace
 
-from hn_search.research.threads import combine_verdicts, pack, split_story, story_prompt
+from hn_search.research.threads import combine_verdicts, pack, split_story
 from tests.research_helpers import node, snapshot
 
 
@@ -13,9 +14,9 @@ class ThreadTests(unittest.TestCase):
         tree["root"]["item"]["type"] = "poll"
         tree["poll_options"] = [node(2, type="pollopt", poll=1, score=4,
                                      text="First choice", replies=replies)]
-        prompt = story_prompt(tree)
-        self.assertIn('<comment id="20" parent="2"', prompt)
-        self.assertIn('<comment id="200" parent="20"', prompt)
+        whole, = split_story(tree, 10000)
+        self.assertIn('<comment id="20" parent="2"', whole.text)
+        self.assertIn('<comment id="200" parent="20"', whole.text)
         parts = split_story(tree, 400)
         self.assertGreater(len(parts), 1)
         self.assertLess(len(parts), 5)
@@ -27,11 +28,11 @@ class ThreadTests(unittest.TestCase):
         missing["item"] = None
         tree = snapshot(replies=[node(1001), node(1002, deleted=True),
                                  node(1003, type="story"), missing])
-        prompt = story_prompt(tree)
-        self.assertEqual(prompt.count("Source citation:"), 1)
-        self.assertIn("Source citation: [c1001]", prompt)
+        whole, = split_story(tree, 10000)
+        self.assertEqual(whole.text.count("Source citation:"), 1)
+        self.assertIn("Source citation: [c1001]", whole.text)
         for cid in (1002, 1003, 1004):
-            self.assertNotIn(f"[c{cid}]", prompt)
+            self.assertNotIn(f"[c{cid}]", whole.text)
 
     def test_top_level_and_nested_parts_keep_context_and_exact_coverage(self):
         children = [node(30 + i, parent=20, text="Reply. " * 35) for i in range(6)]
@@ -50,7 +51,13 @@ class ThreadTests(unittest.TestCase):
         whole = split_story(tree, 10000)
         self.assertEqual(len(whole), 1)
         self.assertEqual(whole[0].part, 0)
-        self.assertEqual(whole[0].text, story_prompt(tree))
+        self.assertEqual(whole[0].comment_ids, (10, 20, *range(30, 36), 40))
+        self.assertEqual(re.findall(r'<comment id="(\d+)"', whole[0].text),
+                         ['10', '20', *map(str, range(30, 36)), '40'])
+        self.assertTrue(whole[0].text.startswith('<hn_story id="1" part="0"'))
+        self.assertTrue(whole[0].text.endswith('</hn_story>'))
+        self.assertIn('<comment id="20" parent="10"', whole[0].text)
+        self.assertNotIn('<context>', whole[0].text)
         self.assertNotIn("#", whole[0].input_key)
         self.assertEqual(split_story(tree, whole[0].size)[0].part, 0)
 

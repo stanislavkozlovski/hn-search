@@ -19,6 +19,25 @@ class RenderTests(unittest.TestCase):
                          "1\\. one\n\\- two\n\\+ three")
         self.assertEqual(html_to_markdown("<b>[[x]]</b>", escape=False), "[[x]]")
 
+    def test_markup_policies_with_and_without_escaping(self):
+        cases = [
+            ('雪 &amp; café &lt;tag&gt;<p><i>fine</i> <b>bold</b>',
+             '雪 & café \\<tag\\>\n\n*fine* bold', '雪 & café <tag>\n\n*fine* bold'),
+            ('<a href="item?id=42">[[reply]]</a>',
+             r'[\[\[reply\]\]](<https://news.ycombinator.com/item?id=42>)',
+             '[[[reply]]](<https://news.ycombinator.com/item?id=42>)'),
+            ('<a href="https://[broken">[[x]]</a>', r'\[\[x\]\]', '[[x]]'),
+            ('<a href="javascript:evil()">[[x]]</a>', r'\[\[x\]\]', '[[x]]'),
+            ('<a href="https://a.test/?q=&amp;nbsp;">link</a>',
+             '[link](<https://a.test/?q=%C2%A0>)', '[link](<https://a.test/?q=%C2%A0>)'),
+            ('before<pre>[[x]] &amp;\n```',
+             'before\n\n````\n[[x]] &\n```\n````', 'before\n\n````\n[[x]] &\n```\n````'),
+        ]
+        for source, escaped, raw in cases:
+            for escape, expected in ((True, escaped), (False, raw)):
+                with self.subTest(source=source, escape=escape):
+                    self.assertEqual(html_to_markdown(source, escape), expected)
+
     def test_first_paragraph_anchors_placeholders_and_relative_citations(self):
         tree = snapshot(replies=[node(11, text="First<p>Second"),
                                  node(12, text="<pre><code>code</code></pre>"),

@@ -38,6 +38,10 @@ class MarkdownTests(unittest.TestCase):
         self.assertNotIn('javascript:', result)
         self.assertIn(r'\<script\>literal\</script\>', result)
         self.assertEqual(html_to_markdown('<a href="https://[broken">still readable</a>'), 'still readable')
+        self.assertEqual(html_to_markdown('<a href="https://a.test/x y&gt;">link</a>'),
+                         '[link](https://a.test/x%20y%3E)')
+        self.assertEqual(html_to_markdown('<a href="https://a.test/?q=&amp;nbsp;">link</a>'),
+                         '[link](https://a.test/?q=&nbsp;)')
 
 
 class ExportTests(unittest.TestCase):
