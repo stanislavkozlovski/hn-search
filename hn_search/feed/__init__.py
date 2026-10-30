@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 
 # A line shows at most this many point values, and pack() reserves room for all of them.
 MAX_SHOWN_POINTS = 10
+COMPACTION_WINDOW_SECONDS = 24 * 60 * 60
+COMPACT_AFTER_MESSAGES = 10
 
 
 @dataclass(frozen=True)

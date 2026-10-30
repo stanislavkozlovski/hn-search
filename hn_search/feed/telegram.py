@@ -38,7 +38,7 @@ def render(message, *, worst_case=False, markup=True):
             links.insert(0, line.url)
         parts.append(f"[{', '.join(line.tags)}] {text(line.title)}\n"
                      + " ".join(history) + " · " + " · ".join(text(url) for url in links))
-    return "\n".join(parts)
+    return parts[0] + "\n\n" + "\n\n--------------------\n\n".join(parts[1:])
 
 
 def pack(messages):
@@ -66,10 +66,12 @@ def safe_error(error, tokens):
 
 
 def _request(message, method, tokens, *, opener):
-    if utf16_units(render(message, markup=False)) > LIMIT:
-        raise TelegramError(f"{message.bot_token_env}: message exceeds Telegram's text limit")
-    payload = {"chat_id": message.chat_id, "text": render(message), "parse_mode": "HTML"}
-    if method == "editMessageText":
+    payload = {"chat_id": message.chat_id}
+    if method != "deleteMessage":
+        if utf16_units(render(message, markup=False)) > LIMIT:
+            raise TelegramError(f"{message.bot_token_env}: message exceeds Telegram's text limit")
+        payload.update(text=render(message), parse_mode="HTML", link_preview_options={"is_disabled": True})
+    if method != "sendMessage":
         payload["message_id"] = message.telegram_message_id
     token = tokens[message.bot_token_env]
     request = Request(f"https://api.telegram.org/bot{token}/{method}",
@@ -92,6 +94,9 @@ def _request(message, method, tokens, *, opener):
     if (method == "editMessageText" and (http_status or body.get("error_code")) == 400
             and isinstance(description, str) and description.startswith("Bad Request: message is not modified")):
         return None
+    if (method == "deleteMessage" and (http_status or body.get("error_code")) == 400
+            and description == "Bad Request: message to delete not found"):
+        return True
     if http_status is not None or body.get("ok") is not True:
         description = safe_error(description, tokens)
         raise TelegramError(f"{message.bot_token_env}: {description}") from None
@@ -108,3 +113,8 @@ def send_message(message, tokens, *, opener):
 
 def edit_message(message, tokens, *, opener):
     _request(message, "editMessageText", tokens, opener=opener)
+
+
+def delete_message(message, tokens, *, opener):
+    if _request(message, "deleteMessage", tokens, opener=opener) is not True:
+        raise TelegramError(f"{message.bot_token_env}: Invalid Telegram delete response")

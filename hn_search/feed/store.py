@@ -1,12 +1,13 @@
 """Feed schema and short transactions; no research-catalog writes or bot tokens."""
 
+from dataclasses import replace
 import json
 import sqlite3
 
-from hn_search.feed import MAX_SHOWN_POINTS, Batch, Line, Message
+from hn_search.feed import COMPACTION_WINDOW_SECONDS, MAX_SHOWN_POINTS, Batch, Line, Message
 
 APPLICATION_ID = 0x484E4644
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 SCHEMA = (
     """CREATE TABLE stories (
         id INTEGER PRIMARY KEY, title TEXT NOT NULL, url TEXT,
@@ -21,7 +22,8 @@ SCHEMA = (
         categories TEXT NOT NULL, decided_at INTEGER NOT NULL, PRIMARY KEY (lens, story_id))""",
     """CREATE TABLE messages (
         id INTEGER PRIMARY KEY, bot_token_env TEXT NOT NULL, chat_id INTEGER NOT NULL,
-        telegram_message_id INTEGER NOT NULL, sent_at INTEGER NOT NULL)""",
+        telegram_message_id INTEGER NOT NULL, sent_at INTEGER NOT NULL,
+        superseded_by INTEGER REFERENCES messages(id), deleted_at INTEGER)""",
     """CREATE TABLE message_lines (
         message_id INTEGER NOT NULL REFERENCES messages(id), position INTEGER NOT NULL,
         lens TEXT NOT NULL, story_id INTEGER NOT NULL REFERENCES stories(id), tags TEXT NOT NULL,
@@ -46,7 +48,15 @@ def open_feed(path):
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1").fetchone()
         if application_id == APPLICATION_ID:
-            if version != SCHEMA_VERSION:
+            if version in (1, 2):
+                with conn:
+                    conn.execute("BEGIN")
+                    conn.execute("ALTER TABLE messages ADD COLUMN superseded_by INTEGER REFERENCES messages(id)")
+                    conn.execute("ALTER TABLE messages ADD COLUMN deleted_at INTEGER")
+                    if version == 2:
+                        conn.execute("DROP TABLE send_attempts")
+                    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            elif version != SCHEMA_VERSION:
                 raise ValueError(f"Unsupported feed user_version: {version}")
         elif has_tables or application_id != 0 or version != 0:
             raise ValueError("Refusing a database that is not an HN feed")
@@ -126,18 +136,22 @@ def _points(conn, story_id):
     return tuple(values if len(values) <= MAX_SHOWN_POINTS else [values[0], *values[1 - MAX_SHOWN_POINTS:]])
 
 
-def pending_lines(conn, lenses, stories):
+def pending_lines(conn, lenses):
+    """Keep classified matches queued even after they leave Algolia's search window."""
     destinations = {}
     for lens in lenses:
         destination = (lens.bot_token_env, lens.chat_id)
-        for story in sorted(stories, key=lambda story: story.id):
-            tags = _current_tags(conn, lens, story)
+        rows = conn.execute("""SELECT s.id, s.title, s.url, d.categories FROM stories s
+            JOIN decisions d ON d.story_id = s.id
+            WHERE d.lens = ? AND d.title = s.title AND d.url IS s.url AND d.categories_digest = ?
+              AND NOT EXISTS (SELECT 1 FROM message_lines ml WHERE ml.lens = d.lens AND ml.story_id = s.id)
+            ORDER BY s.first_seen_at, s.id""", (lens.name, lens.categories_digest))
+        for row in rows:
+            tags = tuple(json.loads(row["categories"]))
             if not tags:
                 continue
-            if conn.execute("SELECT 1 FROM message_lines WHERE lens = ? AND story_id = ?", (lens.name, story.id)).fetchone():
-                continue
             destinations.setdefault(destination, []).append(Line(
-                lens.name, story.id, tags, story.title, story.url, _points(conn, story.id),
+                lens.name, row["id"], tags, row["title"], row["url"], _points(conn, row["id"]),
             ))
     return [Message(bot, chat, tuple(lines)) for (bot, chat), lines in destinations.items()]
 
@@ -153,6 +167,57 @@ def record_message(conn, message, telegram_message_id, now):
             ))
 
 
+def _saved_lines(conn, message_id):
+    return tuple(Line(row["lens"], row["story_id"], tuple(json.loads(row["tags"])),
+                      row["title"], row["url"], tuple(json.loads(row["shown_points"])))
+                 for row in conn.execute("SELECT * FROM message_lines WHERE message_id = ? ORDER BY position", (message_id,)))
+
+
+def recent_messages(conn, lenses, now):
+    destinations = {(lens.bot_token_env, lens.chat_id) for lens in lenses}
+    grouped = {}
+    for row in conn.execute("""SELECT * FROM messages WHERE superseded_by IS NULL
+        AND sent_at > ? ORDER BY sent_at, id""", (now - COMPACTION_WINDOW_SECONDS,)):
+        destination = (row["bot_token_env"], row["chat_id"])
+        if destination in destinations:
+            grouped.setdefault(destination, []).append(Message(
+                *destination, _saved_lines(conn, row["id"]), row["telegram_message_id"], row["id"],
+            ))
+    return grouped.values()
+
+
+def record_compaction(conn, originals, replacements):
+    """Move delivery records only after every replacement is confirmed in Telegram."""
+    retained = {message.id for message in replacements}
+    owners = {(line.lens, line.story_id): message.id for message in replacements for line in message.lines}
+    with conn:
+        for message in originals:
+            conn.execute("DELETE FROM message_lines WHERE message_id = ?", (message.id,))
+            if message.id not in retained:
+                conn.execute("UPDATE messages SET superseded_by = ? WHERE id = ?",
+                             (owners[(message.lines[0].lens, message.lines[0].story_id)], message.id))
+        for message in replacements:
+            for position, line in enumerate(message.lines):
+                conn.execute("INSERT INTO message_lines VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
+                    message.id, position, line.lens, line.story_id, json.dumps(line.tags),
+                    line.title, line.url, json.dumps(line.shown_points),
+                ))
+
+
+def messages_to_delete(conn, lenses):
+    destinations = {(lens.bot_token_env, lens.chat_id) for lens in lenses}
+    rows = conn.execute("""SELECT * FROM messages WHERE superseded_by IS NOT NULL
+        AND deleted_at IS NULL ORDER BY id""").fetchall()
+    for row in rows:
+        if (row["bot_token_env"], row["chat_id"]) in destinations:
+            yield Message(row["bot_token_env"], row["chat_id"], (), row["telegram_message_id"], row["id"])
+
+
+def record_delete(conn, message, now):
+    with conn:
+        conn.execute("UPDATE messages SET deleted_at = ? WHERE id = ?", (now, message.id))
+
+
 def messages_to_edit(conn, lenses, stories):
     destinations = {(lens.bot_token_env, lens.chat_id) for lens in lenses}
     current = {story.id: story.points for story in stories}
@@ -160,12 +225,12 @@ def messages_to_edit(conn, lenses, stories):
         if (row["bot_token_env"], row["chat_id"]) not in destinations:
             continue
         lines, changed = [], False
-        for saved in conn.execute("SELECT * FROM message_lines WHERE message_id = ? ORDER BY position", (row["id"],)):
-            points = tuple(json.loads(saved["shown_points"]))
-            if saved["story_id"] in current and len(points) < MAX_SHOWN_POINTS and current[saved["story_id"]] != points[-1]:
-                points += (current[saved["story_id"]],)
+        for saved in _saved_lines(conn, row["id"]):
+            points = saved.shown_points
+            if saved.story_id in current and len(points) < MAX_SHOWN_POINTS and current[saved.story_id] != points[-1]:
+                points += (current[saved.story_id],)
                 changed = True
-            lines.append(Line(saved["lens"], saved["story_id"], tuple(json.loads(saved["tags"])), saved["title"], saved["url"], points))
+            lines.append(replace(saved, shown_points=points))
         if changed:
             yield Message(row["bot_token_env"], row["chat_id"], tuple(lines), row["telegram_message_id"], row["id"])
 

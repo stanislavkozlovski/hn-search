@@ -270,20 +270,48 @@ points, model, effort, and prompt changes reuse them. A new or renamed lens
 only judges newly discovered stories. Keep the same lens name to retain its
 history; removing it stops its calls and sends.
 
-Matching stories arrive grouped by bot and chat with titles, categories,
-article/HN links, and points. Later runs edit only the points, for example
+Matching stories arrive as digests grouped by bot and chat with titles,
+categories, article/HN links, and points. Link previews are disabled, and blank
+lines and dashed separators divide stories. Every hourly run sends its new
+matches immediately; empty queues send nothing. Once a bot/chat has more than
+ten feed messages from the last 24 hours, the feed combines their stories into
+the fewest messages that fit Telegram's text limit, normally five or fewer.
+It edits the oldest existing messages to contain the combined stories, then
+deletes the messages they replace. Every title, category, article/HN link, and
+shown score stays in the retained messages. If the complete content needs more
+than five messages, it keeps those messages rather than dropping stories.
+The next hour posts new matches normally, and compaction repeats when needed.
+
+Matching stories remain queued after leaving the ten-hour search window,
+across send failures and restarts; removed lenses and outdated decisions do not
+send. Hourly collection, classification, and score edits continue normally.
+
+Later runs edit only the points, for example
 `6 points` becomes `<s>6 points</s> 19 points` in Telegram HTML. Earlier
 observations appear on a delayed first send, too. Each message reserves room
 for at most ten shown values per story. Points stop updating when the story
 leaves the search window. Two matching lenses in one chat can repeat a story.
 
-Each run attempts a pending send once while its story is still in the current
-search. A lost send response can cause a duplicate next hour. A failed
-classifier batch stops further classification but still permits pending sends
-and edits. Config, source, SQLite, classifier, and send failures exit 1;
-edit failures alone are logged and exit 0. Usage errors exit 2. There are no
-in-run retries, catch-up beyond ten hours, or saved-story search/resend commands.
-Stories, observations, decisions, and message records are never pruned.
+Each run attempts every pending size-limited message once. A lost send response
+can cause a duplicate next hour. A failed classifier batch stops further
+classification but still permits pending sends, score edits, and compaction.
+Every combined message must be confirmed in Telegram before delivery records
+move or any original message is deleted. If an edit fails, originals stay in
+place. Once those edits succeed, pending deletions are saved in SQLite and retry
+across restarts; Telegram's already-missing response counts as a successful
+delete. Only tracked feed messages are compacted, per bot/chat, within the
+24-hour window. Compaction does not depend on opening or reading the chat.
+
+Config, source, SQLite, classifier, send, compaction, and delete failures exit 1;
+ordinary score-edit failures alone are logged and exit 0. Usage errors exit 2.
+There are no in-run retries, discovery of stories older than the ten-hour search
+window, or saved-story search/resend commands. Stories, observations, decisions,
+and message records are never pruned; compacted deliveries keep their audit rows.
+
+Opening an existing feed database atomically migrates schema v1 or v2 to v3,
+preserving stories and delivery history. The interim v2 send throttle is removed.
+Back up the database before upgrading; older feed code refuses schema v3. The
+independent research catalog's schema is unchanged.
 
 The offline suite uses scripted HTTP and a fake Codex executable. An opt-in
 live probe checks Luna's structured reply, disabled features, and absence of
