@@ -32,6 +32,8 @@ class Progress:
         if not self.terminal:
             return
         with self.lock:
+            if self.closed:
+                return
             self._clear()
             spinner = SPINNER[self.frame % len(SPINNER)]
             self.frame += 1
@@ -92,9 +94,11 @@ class Progress:
         return ask(prompt)
 
     def close(self):
-        if self.closed:
-            return
-        self.active = None
-        self._draw()
-        self.drawn = 0
-        self.closed = True
+        # An AI failure may finalize the display before busy() stops its ticker.
+        with self.lock:
+            if self.closed:
+                return
+            self.active = None
+            self._draw()
+            self.drawn = 0
+            self.closed = True

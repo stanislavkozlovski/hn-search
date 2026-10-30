@@ -189,6 +189,26 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM research_runs WHERE finished_at IS NOT NULL").fetchone()[0], 0)
         self.assertIn("verdict call 2/2 failed for", error.getvalue())
 
+    def test_ai_failure_stays_below_the_shared_terminal_checklist(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        self.stream = Terminal()
+        self.client.fail = lambda call: call.name == "verdict"
+        with redirect_stderr(self.stream), self.assertRaisesRegex(RuntimeError, "test client failure"):
+            self.run_pipeline()
+        diagnostic = "research: verdict call 1/1 failed for 1, 2, 3, 4, 5, 6"
+        output = self.stream.getvalue()
+        self.assertEqual(output.count(diagnostic), 1)
+        final_frame = output.rsplit("\x1b[J", 1)[-1].splitlines()
+        self.assertEqual(final_frame[-1], diagnostic)
+        self.assertEqual(len(final_frame), 6)
+        for line, stage in zip(final_frame[:-1], ("search", "download", "classify", "analyze", "report")):
+            self.assertRegex(line, rf"^[✓·] {stage}\b")
+        # Clearing after this line would erase it on the shared screen.
+        self.assertNotIn("\x1b[J", output[output.index(diagnostic):])
+
     def test_sqlite_and_interrupt_download_failures_propagate(self):
         for error in (sqlite3.OperationalError("locked"), KeyboardInterrupt()):
             def fail(*args):

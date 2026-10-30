@@ -19,7 +19,7 @@ def agree_settings(client, cwd, ask, progress):
         with progress.busy("settings", "model settings · gpt-6-luna medium"):
             result = run_stage(client, "settings", PROMPTS["settings"].render(
                 table=screen, exchange=exchange, reply=reply),
-                cwd=cwd, model="gpt-6-luna", effort="medium").output
+                cwd=cwd, model="gpt-6-luna", effort="medium", before_failure=progress.close).output
         revised = {stage: result[stage] for stage in DEFAULT_SETTINGS}
         exchange.append({"result": result})
         if result["note"]:
@@ -54,7 +54,8 @@ def agree_keywords(client, cwd, settings, ask, progress, *, state=None, question
                                            exchange=exchange, reply=reply)
         model, effort = settings["keywords"]["model"], settings["keywords"]["effort"]
         with progress.busy("keywords", f"keywords · {model} {effort}"):
-            result = run_stage(client, "keywords", prompt, cwd=cwd, model=model, effort=effort).output
+            result = run_stage(client, "keywords", prompt, cwd=cwd, model=model, effort=effort,
+                               before_failure=progress.close).output
         if not result["question"].strip():
             raise ValueError("keyword reply returned an empty question")
         keywords = normalize_keywords(result["keywords"])

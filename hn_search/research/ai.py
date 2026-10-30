@@ -165,7 +165,7 @@ def validate_reply(name, output, units, allowed_ids):
 
 
 def run_stage(client, name, prompt, *, cwd, model, effort, units=(), allowed_ids=None,
-              schema=None, call_label=None, source_story_ids=(), stderr=None):
+              schema=None, call_label=None, source_story_ids=(), stderr=None, before_failure=None):
     """Validate the entire call before a caller can save any of its results."""
     if schema is None:
         from .prompts import PROMPTS
@@ -192,6 +192,8 @@ def run_stage(client, name, prompt, *, cwd, model, effort, units=(), allowed_ids
         if response_schema is not schema:
             response_schema.validate_response(output)
     except BaseException:
+        if before_failure is not None:
+            before_failure()
         stories = ", ".join(map(str, story_ids)) or "conversation/report"
         print(f"research: {label} failed for {stories}", file=stderr or sys.stderr, flush=True)
         raise

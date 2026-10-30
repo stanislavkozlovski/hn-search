@@ -110,7 +110,7 @@ def _story_stage(conn, run_id, snapshots, name, settings, question, client, cwd,
             reply = run_stage(client, name, story_call(name, call_question, call), cwd=cwd,
                               model=setting["model"], effort=setting["effort"], units=call,
                               allowed_ids=allowed[call[0].story_id] if name == "analysis" else allowed,
-                              call_label=f"{name} call {index}/{len(calls)}")
+                              call_label=f"{name} call {index}/{len(calls)}", before_failure=progress.close)
         output = {(item["story_id"], item["part"]): item for item in reply.output["stories"]} if name != "analysis" else {
             (call[0].story_id, call[0].part): reply.output}
         pending = {identity: store.SavedResult(0, keys[identity], result) for identity, result in output.items()}
@@ -154,7 +154,8 @@ def _synthesize(conn, run_id, question, settings, stories, client, cwd, folder, 
     with progress.busy("report", f"{name} · {setting['model']} {setting['effort']}"):
         result = run_stage(client, name, prompt, cwd=folder if name == "folder_synthesis" else cwd,
                            model=setting["model"], effort=setting["effort"], allowed_ids=allowed,
-                           source_story_ids=[story["snapshot"]["root_id"] for story in stories])
+                           source_story_ids=[story["snapshot"]["root_id"] for story in stories],
+                           before_failure=progress.close)
     store.save_call(conn, run_id, [(key, result.output, cited_ids(result.output))], result.usage, now=clock())
     progress.event(name + " complete")
     return result.output
