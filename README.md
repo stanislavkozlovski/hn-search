@@ -3,14 +3,15 @@
 - **Old posts:** `collect` saves metadata for nondeleted top-level HN posts with at least five reported comments from ClickHouse into SQLite, resuming interrupted imports.
 - **New posts:** Each run then rescans posts created in the preceding five days, adds newly eligible posts, and refreshes eligible saved metadata. Posts that stop qualifying keep their last eligible snapshot; there is no catch-up outside that window.
 - **Discussions:** `archive` downloads catalog stories and their comments into SQLite with reusable JSON and Markdown exports.
-- **Use:** Build a local catalog and save discussions now; topic searches and AI reports with linked arguments come later, as described in the [one-pager](docs/one-pagers/hn-topic-research.md).
+- **Research:** Ask a question, approve model settings and keywords, search the catalog, and produce a cited report from archived discussions.
 
 ## Usage and collection details
 
 Collect a local SQLite catalog of Hacker News post metadata from ClickHouse's
 [`hackernews_history` mirror](https://play.clickhouse.com/). This implements the
 [metadata collection design](https://github.com/stanislavkozlovski/hn-search/pull/1).
-Use `archive` below to save comments. Article bodies, search, and AI reports are deferred.
+Use `archive` below to save comments, or `research` to search and analyze them.
+Article bodies are not fetched.
 
 Use Python 3.12+ with SQLite 3.31+ from the repository root. No dependencies or
 package installation are needed:
@@ -76,12 +77,12 @@ python3 -m unittest discover -s tests
 Download discussions for stories already present in the metadata catalog:
 
 ```bash
-python3 -m hn_search archive 4517440 126809
+python3 -m hn_search --db hn.sqlite3 archive 4517440 126809
 python3 -m hn_search --db hn.sqlite3 archive --export-dir exports 4517440
 ```
 
-`archive` defaults to `hn.sqlite3` and `exports/`, relative to the current working
-directory. `collect` and `feed` still require an explicit top-level `--db`.
+`archive` requires a top-level `--db` and defaults to `exports/`, relative to the
+current working directory. `collect` and `feed` also require `--db`.
 Repeated IDs are ignored. Every requested ID must exist in `posts`; missing IDs
 are all reported before any archive migration or HTTP request.
 
@@ -131,6 +132,95 @@ batch or `archive_story(conn, root, export_dir)` for one story. Both require exp
 paths and a catalog connection owned by the calling thread. Failures propagate
 after running responses drain; callers choose their own continuation policy.
 Downloads require only the Python standard library.
+
+## Topic research
+
+Research needs Python 3.12+, exactly `stan-ai-client==0.1.19`, and a logged-in
+Linux Codex CLI. `collect` and `archive` still need no package:
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 -m hn_search research
+python3 -m hn_search --db ~/hn/hn.sqlite3 research --out ~/vault/hn
+```
+
+`research` defaults to an existing `hn.sqlite3` and writes `research/run-<id>/`.
+It refuses a missing catalog, a different client version, or an existing next
+run folder before making any AI call. Other commands require `--db`.
+
+The terminal first shows four model settings: Luna at medium effort for
+keywords, Luna at high for descriptions and relevance, and Astra at max for
+thread analysis and the report. Keep or revise the table in plain language.
+Every reply, including approval, goes through the AI; an edit plus approval
+shows the changed table for another approval. Settings replies always use
+Luna at medium. Models are limited to Astra, Luna, and Sol, with efforts from
+low through max; no automatic substitution occurs.
+
+Next enter your question and refine the proposed keywords. A reply can narrow
+the question as well. Approval covers exactly the question and normalized
+keywords on screen. Search unescapes HTML entities, lowercases, turns runs of
+nonletters/nondigits into spaces, and matches whole phrases in titles, URLs,
+and post text. Thus `rent-to-own` matches “rent to own,” and `renting` matches a
+URL slug containing that word, but `rent` does not match “renting” or “current.”
+
+Every approved search shows per-keyword counts, its three largest matches,
+and estimated work. Approve the gate to proceed or describe a revision; a
+changed question/list searches and gates again. Nothing is sampled or rejected
+by title before downloading. Every match goes through `archive_story()`,
+reusing completed archives without refreshing them.
+
+Descriptions and verdicts pack the largest missing inputs first, at most 20
+units per call, within 80% of the selected model's context window. Large
+discussions split at reply subtrees with ancestry retained; parts combine
+without another AI call. Network/HTTP/JSON download failures and unavailable
+roots appear in coverage. SQLite errors, interrupts, and any failed AI call
+stop the run without retries, skipping failed AI work, or waiting out limits.
+Completed calls remain committed; each call's checked results save atomically.
+
+Only relevant stories get deep analyses and folders:
+
+```text
+research/run-1/
+├── report.md
+└── stories/<story-id>/
+    ├── thread.json
+    ├── thread.md
+    └── analysis.md
+```
+
+`report.md` contains the synthesis, every relevant thread, and coverage for all
+other matches, including uncertain verdicts and their reasons. Arguments link
+to comment blocks in `thread.md` through Obsidian links beginning with `./`.
+Keep the run folder together when moving it into a vault. Smaller reports use
+one inline synthesis; larger reports use one session that reads every analysis
+in the run folder. No relevant stories means a coverage-only report.
+
+A new run repeats both conversations. Descriptions reuse across questions;
+verdicts, analyses, and synthesis require the exact question and all other
+cache inputs to match, including source, prompt/schema version, model, effort,
+and part. There is no stopped-run resume command or automatic cleanup.
+Schema v3 adds tables beside the collector and archive tables; older code
+leaves them unused and continues collecting.
+
+Every Codex call uses a read-only permission profile with root reads denied,
+the working folder and minimal system paths readable, and one additional read
+grant for the resolved native Codex executable file. Its neighboring data is
+not granted. Inline calls use an empty scratch folder; folder synthesis uses
+the run folder. Network, web search, and connectors are disabled, user config
+and rules are ignored, AGENTS.md discovery is disabled, and sessions are ephemeral.
+
+Before merge, and after upgrading Codex, run the real isolation canary. It
+checks an actual inside-file read and denies fresh canaries beside both the
+run folder and the executable, without reading real credentials. Headroom
+checks fill each inline prompt to the 80% estimate and record actual usage:
+
+```bash
+HN_RESEARCH_CANARY=1 python3 -m unittest tests.test_research_live.FolderCanaryTests
+HN_RESEARCH_HEADROOM=1 python3 -m unittest tests.test_research_live.HeadroomTests
+```
+
+Both write local evidence under ignored `research/`. The regular test suite
+uses fake AI/HTTP calls and spends no model usage.
 
 ## Telegram feed
 
