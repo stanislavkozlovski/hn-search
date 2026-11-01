@@ -105,6 +105,9 @@ class StructuredCallTests(unittest.TestCase):
                                allowed_ids={1001} if name == "analysis" else {1: {1001}})
             self.assertEqual(result.usage["input_tokens"], 100)
         self.assertEqual(len(client.calls), 3)
+        from stan_ai_client import ProviderRetryPolicy
+        self.assertTrue(all(isinstance(call.provider_retry_policy, ProviderRetryPolicy) for call in client.calls))
+        self.assertTrue(all(call.provider_retry_policy.server_window == 36000 for call in client.calls))
         self.assertTrue(all(call.options.cwd == Path("/work/run") for call in client.calls))
         self.assertTrue(all(call.options.permission_mode == "default" for call in client.calls))
 
