@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from stan_ai_client import CodexRunOptions, StructuredSchema
+from stan_ai_client import CodexRunOptions, StructuredSchema, ProviderRetryPolicy
 
 from .render import ANALYSIS_FIELDS, CITATION
 from .threads import UNITS_PER_CALL, estimate_tokens
@@ -176,7 +176,7 @@ def run_stage(client, name, prompt, *, cwd, model, effort, units=(), allowed_ids
             raise ValueError(f"{name} call exceeds {UNITS_PER_CALL} story units")
         response = client.run_structured(
             prompt, schema=response_schema, options=run_options(name, cwd, model, effort),
-            capture_usage=True,
+            capture_usage=True, provider_retry_policy=ProviderRetryPolicy(),
         )
         output = response.structured_output
         schema.validate_response(output)

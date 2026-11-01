@@ -71,7 +71,7 @@ class FakeClient:
         self.before_call = None
         self.transform = None
 
-    def run_structured(self, prompt, *, schema, options, capture_usage):
+    def run_structured(self, prompt, *, schema, options, capture_usage, provider_retry_policy):
         from hn_search.research.ai import DEFAULT_SETTINGS, ANALYSIS_FIELDS
 
         properties = schema.schema["properties"]
@@ -87,7 +87,8 @@ class FakeClient:
             name = "analysis"
         else:
             name = "folder_synthesis" if prompt.startswith("Synthesize the approved question") else "synthesis"
-        call = SimpleNamespace(name=name, prompt=prompt, options=options, schema=schema)
+        call = SimpleNamespace(name=name, prompt=prompt, options=options, schema=schema,
+                               provider_retry_policy=provider_retry_policy)
         self.calls.append(call)
         if self.before_call:
             self.before_call(call)
