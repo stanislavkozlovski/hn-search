@@ -11,6 +11,8 @@ from urllib.request import urlopen
 from hn_search.catalog import open_catalog
 from hn_search.collect import collect_daily, collect_history
 
+RESEARCH_CLIENT_VERSION = "0.1.21"  # The stan-ai-client pin in requirements.txt.
+
 
 def main(argv=None, *, opener=urlopen, clock=time.time):
     parser = argparse.ArgumentParser(description="Collect or research Hacker News, archive discussions, or send a Telegram feed")
@@ -34,9 +36,9 @@ def main(argv=None, *, opener=urlopen, clock=time.time):
         try:
             version = importlib.metadata.version("stan-ai-client")
         except importlib.metadata.PackageNotFoundError:
-            parser.error("research requires stan-ai-client==0.1.19")
-        if version != "0.1.19":
-            parser.error(f"research requires stan-ai-client==0.1.19; installed {version}")
+            parser.error(f"research requires stan-ai-client=={RESEARCH_CLIENT_VERSION}")
+        if version != RESEARCH_CLIENT_VERSION:
+            parser.error(f"research requires stan-ai-client=={RESEARCH_CLIENT_VERSION}; installed {version}")
         from hn_search.research.pipeline import main as research_main
 
         return research_main(db, args.out)

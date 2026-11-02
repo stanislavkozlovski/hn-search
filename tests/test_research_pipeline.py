@@ -13,7 +13,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
-from hn_search.__main__ import main
+from hn_search.__main__ import RESEARCH_CLIENT_VERSION, main
 from hn_search.catalog import commit_page, open_catalog
 from hn_search.clickhouse import Post
 from tests.research_helpers import ArchiveFixture, FakeClient, NOW, snapshot
@@ -45,6 +45,10 @@ class ResearchUsageTests(unittest.TestCase):
                     main(["--db", str(db), "research", "--out", str(Path(directory) / "out")])
                 self.assertEqual(raised.exception.code, 2)
             self.assertFalse((Path(directory) / "out").exists())
+
+    def test_research_gate_matches_the_requirements_pin(self):
+        pins = (ROOT / "requirements.txt").read_text().split()
+        self.assertIn(f"stan-ai-client=={RESEARCH_CLIENT_VERSION}", pins)
 
 
 @unittest.skipUnless(importlib.util.find_spec("stan_ai_client"), "optional stan-ai-client is absent")
