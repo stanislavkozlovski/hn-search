@@ -10,6 +10,8 @@
 Collect a local SQLite catalog of Hacker News post metadata from ClickHouse's
 [`hackernews_history` mirror](https://play.clickhouse.com/). This implements the
 [metadata collection design](https://github.com/stanislavkozlovski/hn-search/pull/1).
+A Hugging Face Parquet copy was evaluated as an alternative source and not adopted; see
+[the evaluation](docs/research/hf-hacker-news-mirror.md).
 Use `archive` below to save comments, or `research` to search and analyze them.
 Article bodies are not fetched.
 
