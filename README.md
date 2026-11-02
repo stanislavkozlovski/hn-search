@@ -135,7 +135,7 @@ Downloads require only the Python standard library.
 
 ## Topic research
 
-Research needs Python 3.12+, exactly `stan-ai-client==0.1.19`, and a logged-in
+Research needs Python 3.12+, exactly `stan-ai-client==0.1.21`, and a logged-in
 Linux Codex CLI. `collect` and `archive` still need no package:
 
 ```bash
@@ -230,7 +230,7 @@ keeps every story and score observation in a separate SQLite database and
 classifies only titles and article URLs against your lenses. Never use the
 research catalog's path for `feed`: it refuses that database without changing it.
 
-Install `stan-ai-client==0.1.19` with Python 3.12+ (prefer a virtual environment)
+Install `stan-ai-client==0.1.21` with Python 3.12+ (prefer a virtual environment)
 and put a logged-in `codex` on `PATH`. Save lenses in `lenses.toml`:
 
 ```toml
