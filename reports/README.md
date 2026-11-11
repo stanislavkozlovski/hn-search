@@ -11,6 +11,10 @@ discussions, downloaded 377, and analyzed 297 relevant threads. The report's
 coverage section also records 28 uncertain threads, 52 irrelevant threads, and
 one download timeout.
 
+### Takeaways
+
+- **CO₂ and cognition:** The studies discussed in the [HN summary](https://news.ycombinator.com/item?id=19863319) and [submarine-research exchange](https://news.ycombinator.com/item?id=34658142) do not consistently show that elevated CO₂ at typical indoor concentrations directly impairs cognition.
+
 ## Read in Obsidian
 
 Clone or pull this repository locally. In Obsidian, choose **Open folder as
