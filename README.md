@@ -5,6 +5,9 @@
 - **Discussions:** `archive` downloads catalog stories and their comments into SQLite with reusable JSON and Markdown exports.
 - **Research:** Ask a question, approve model settings and keywords, search the catalog, and produce a cited report from archived discussions.
 
+Read the saved [air-quality report](reports/air-quality/report.md) on PM2.5, NO₂,
+and CO₂, with [instructions for opening its cited discussions in Obsidian](reports/README.md).
+
 ## Usage and collection details
 
 Collect a local SQLite catalog of Hacker News post metadata from ClickHouse's
