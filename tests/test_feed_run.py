@@ -1,4 +1,5 @@
 from contextlib import closing, redirect_stderr
+from datetime import datetime
 from io import StringIO
 import json
 import os
@@ -14,6 +15,34 @@ FORBIDDEN = {"ok": False, "error_code": 403, "description": "Forbidden: bot was 
 
 
 class RunTests(FeedCase):
+    def test_scheduled_digests_group_overnight_and_retry_at_next_delivery_hour(self):
+        self.config.write_text("delivery_hours = [8, 14, 20]\n" + CONFIG)
+        morning = int(datetime(2026, 11, 21, 8).timestamp())
+        evening_before = morning - 11 * 3600
+        self.run_feed(window(hit(1, created_at=evening_before)), now=evening_before)
+        self.run_feed(window(hit(2, created_at=morning - 3600)), now=morning - 3600)
+        first = self.run_feed(window(), sent(), now=morning)
+        self.assertIn("2 new matches", first.requests[1]["payload"]["text"])
+        self.run_feed(window(), now=morning + 20)
+
+        afternoon = morning + 6 * 3600
+        with self.assertRaises(SystemExit):
+            self.run_feed(window(hit(3, created_at=afternoon)), FORBIDDEN, now=afternoon)
+        self.run_feed(window(), now=afternoon + 3600)
+        retry = self.run_feed(window(), sent(813), now=afternoon + 6 * 3600)
+        self.assertIn("item?id=3", retry.requests[1]["payload"]["text"])
+        self.assertNotIn("disable_notification", retry.requests[1]["payload"])
+
+    def test_large_scheduled_digest_and_same_hour_restart_sound_only_once(self):
+        self.config.write_text("delivery_hours = [8, 14, 20]\n" + CONFIG)
+        morning = int(datetime(2026, 11, 21, 8).timestamp())
+        hits = [hit(i, title="Agent " + "x" * 2000, created_at=morning) for i in (1, 2)]
+        first = self.run_feed(window(*hits), sent(), sent(813), now=morning)
+        self.assertNotIn("disable_notification", first.requests[1]["payload"])
+        self.assertTrue(first.requests[2]["payload"]["disable_notification"])
+        rerun = self.run_feed(window(hit(3, created_at=morning)), sent(814), now=morning + 60)
+        self.assertTrue(rerun.requests[1]["payload"]["disable_notification"])
+
     def test_hourly_send_two_score_edits_and_expiry_keep_every_row(self):
         first = self.run_feed(window(hit()), sent())
         self.assertNotIn("<s>", first.requests[1]["payload"]["text"])

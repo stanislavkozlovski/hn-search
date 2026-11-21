@@ -30,6 +30,10 @@ class LensTests(FeedCase):
             ('[classifier]\neffort = "magic"\n' + CONFIG, "effort"),
             ('[classifier]\nprompt = "extra"\n' + CONFIG, "prompt"),
             ("bad = true\n" + CONFIG, "bad"),
+            ("delivery_hours = []\n" + CONFIG, "delivery_hours"),
+            ("delivery_hours = 8\n" + CONFIG, "delivery_hours"),
+            ("delivery_hours = [true]\n" + CONFIG, "delivery_hours"),
+            ("delivery_hours = [8, 24]\n" + CONFIG, "delivery_hours"),
         ]
         for text, error in variants:
             with self.subTest(text=text):

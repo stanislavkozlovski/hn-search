@@ -68,8 +68,10 @@ def safe_error(error, tokens):
     return re.sub(r"https?://api\.telegram\.org/[^\s\"']+", "[Telegram request]", message)
 
 
-def _request(message, method, tokens, *, opener):
+def _request(message, method, tokens, *, opener, silent=False):
     payload = {"chat_id": message.chat_id}
+    if silent:
+        payload["disable_notification"] = True
     if method != "deleteMessage":
         if utf16_units(render(message, markup=False)) > LIMIT:
             raise TelegramError(f"{message.bot_token_env}: message exceeds Telegram's text limit")
@@ -106,8 +108,8 @@ def _request(message, method, tokens, *, opener):
     return body.get("result")
 
 
-def send_message(message, tokens, *, opener):
-    result = _request(message, "sendMessage", tokens, opener=opener)
+def send_message(message, tokens, *, opener, silent=False):
+    result = _request(message, "sendMessage", tokens, opener=opener, silent=silent)
     message_id = result.get("message_id") if isinstance(result, dict) else None
     if type(message_id) is not int or not 0 < message_id < 2**63:
         raise TelegramError(f"{message.bot_token_env}: Invalid Telegram message_id")

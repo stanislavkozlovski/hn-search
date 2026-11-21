@@ -32,6 +32,7 @@ class Settings:
     tokens: dict[str, str] = field(repr=False)
     model: str = "gpt-6-luna"
     effort: str = "high"
+    delivery_hours: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)

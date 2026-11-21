@@ -35,7 +35,13 @@ def _name(value, context):
 def load_settings(path, environ):
     with Path(path).open("rb") as source:
         data = tomllib.load(source)
-    _keys(data, {"classifier", "lens"}, "config")
+    _keys(data, {"classifier", "lens", "delivery_hours"}, "config")
+    hours = data.get("delivery_hours", ())
+    if "delivery_hours" in data and (
+        not isinstance(hours, list) or not hours
+        or any(type(hour) is not int or not 0 <= hour <= 23 for hour in hours)
+    ):
+        raise ValueError("delivery_hours must be a nonempty array of local hours from 0 to 23")
     classifier = data.get("classifier", {})
     _keys(classifier, {"model", "effort"}, "classifier")
     model = _text(classifier.get("model", "gpt-6-luna"), "classifier.model")
@@ -70,4 +76,4 @@ def load_settings(path, environ):
         digest = hashlib.sha256(json.dumps(categories, sort_keys=True).encode()).hexdigest()
         lenses.append(Lens(name, token_env, chat_id, categories, digest))
         tokens[token_env] = token
-    return Settings(tuple(lenses), tokens, model, effort)
+    return Settings(tuple(lenses), tokens, model, effort, tuple(hours))
