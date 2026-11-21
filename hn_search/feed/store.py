@@ -185,6 +185,12 @@ def record_message(conn, message, telegram_message_id, now):
         _save_lines(conn, message_id, message.lines)
 
 
+def destinations_sent_between(conn, start, end):
+    rows = conn.execute("""SELECT DISTINCT bot_token_env, chat_id FROM messages
+        WHERE sent_at BETWEEN ? AND ?""", (start, end))
+    return {tuple(row) for row in rows}
+
+
 def recent_messages(conn, lenses, now):
     grouped = {}
     for message in _tracked(conn, lenses, "superseded_by IS NULL AND sent_at > ? ORDER BY sent_at, id",

@@ -236,6 +236,8 @@ Install `stan-ai-client==0.1.21` with Python 3.12+ (prefer a virtual environment
 and put a logged-in `codex` on `PATH`. Save lenses in `lenses.toml`:
 
 ```toml
+delivery_hours = [8, 14, 20] # optional, in the feed process's local time
+
 [classifier] # optional defaults
 model = "gpt-6-luna"
 effort = "high"
@@ -274,15 +276,19 @@ history; removing it stops its calls and sends.
 
 Matching stories arrive as digests grouped by bot and chat with titles,
 categories, article/HN links, and points. Link previews are disabled, and blank
-lines and dashed separators divide stories. Every hourly run sends its new
-matches immediately; empty queues send nothing. Once a bot/chat has more than
+lines and dashed separators divide stories. The hourly run sends its queued
+matches when its local start hour is in `delivery_hours`. Omit the setting to
+send on every run. An empty queue sends nothing. With scheduled delivery, only
+the first confirmed message for each bot/chat in that hour uses a normal
+notification. Additional parts and same-hour retries are sent silently.
+Once a bot/chat has more than
 ten feed messages from the last 24 hours, the feed combines their stories into
 the fewest messages that fit Telegram's text limit, normally five or fewer.
 It edits the oldest existing messages to contain the combined stories, then
 deletes the messages they replace. Every title, category, article/HN link, and
 shown score stays in the retained messages. If the complete content needs more
 than five messages, it keeps those messages rather than dropping stories.
-The next hour posts new matches normally, and compaction repeats when needed.
+The next delivery hour posts new matches, and compaction repeats when needed.
 
 Matching stories remain queued after leaving the ten-hour search window,
 across send failures and restarts; removed lenses and outdated decisions do not
@@ -294,8 +300,8 @@ observations appear on a delayed first send, too. Each message reserves room
 for at most ten shown values per story. Points stop updating when the story
 leaves the search window. Two matching lenses in one chat can repeat a story.
 
-Each run attempts every pending size-limited message once. A lost send response
-can cause a duplicate next hour. A failed classifier batch stops further
+Each delivery run attempts every pending size-limited message once. A lost send
+response can cause a duplicate at the next delivery. A failed classifier batch stops further
 classification but still permits pending sends, score edits, and compaction.
 Every combined message must be confirmed in Telegram before delivery records
 move or any original message is deleted. If an edit fails, originals stay in

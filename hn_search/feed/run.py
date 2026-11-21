@@ -2,6 +2,7 @@
 
 from contextlib import closing
 from dataclasses import replace
+from datetime import datetime
 import os
 
 from stan_ai_client import CodexClient
@@ -19,7 +20,7 @@ def run_feed(conn, settings, client, *, opener, clock):
     stories = algolia.fetch_window(now, opener=opener)
     new = store.save_window(conn, settings.lenses, stories, now)
     _log(f"window=[{now - algolia.LOOKBACK_SECONDS},{now})", settings, stories=len(stories), new=new)
-    failures, sends, edits = 0, 0, 0
+    failures, edits = 0, 0
     batches = list(store.batches_to_judge(conn, settings.lenses, stories))
     for number, batch in enumerate(batches, 1):
         try:
@@ -31,17 +32,8 @@ def run_feed(conn, settings, client, *, opener, clock):
         store.save_decisions(conn, decisions, now)
         _log("classify", settings, batch=f"{number}/{len(batches)}", stories=len(batch.stories),
              lenses=len(batch.lenses), matched=sum(bool(decision.categories) for decision in decisions))
-    for message in telegram.pack(store.pending_lines(conn, settings.lenses)):
-        try:
-            message_id = telegram.send_message(message, settings.tokens, opener=opener)
-        except telegram.TelegramError as error:
-            _log("send-failed", settings, chat=message.chat_id, error=error)
-            failures += 1
-            continue
-        store.record_message(conn, message, message_id, now)
-        sends += 1
-        _log("send", settings, lens=",".join(dict.fromkeys(line.lens for line in message.lines)),
-             chat=message.chat_id, lines=len(message.lines), message_id=message_id)
+    sends, send_failures = send_pending(conn, settings, opener=opener, now=now)
+    failures += send_failures
     for message in store.messages_to_edit(conn, settings.lenses, stories):
         try:
             telegram.edit_message(message, settings.tokens, opener=opener)
@@ -55,6 +47,35 @@ def run_feed(conn, settings, client, *, opener, clock):
     _log("done", settings, sends=sends, edits=edits, failures=failures)
     if failures:
         raise SystemExit(1)
+
+
+def send_pending(conn, settings, *, opener, now):
+    notified = set()
+    if settings.delivery_hours:
+        local = datetime.fromtimestamp(now)
+        if local.hour not in settings.delivery_hours:
+            _log("delivery-deferred", settings, local_hour=local.hour)
+            return 0, 0
+        start = now - local.minute * 60 - local.second
+        notified = store.destinations_sent_between(conn, start, now)
+
+    sends, failures = 0, 0
+    for message in telegram.pack(store.pending_lines(conn, settings.lenses)):
+        destination = (message.bot_token_env, message.chat_id)
+        try:
+            message_id = telegram.send_message(message, settings.tokens, opener=opener,
+                                               silent=destination in notified)
+        except telegram.TelegramError as error:
+            _log("send-failed", settings, chat=message.chat_id, error=error)
+            failures += 1
+            continue
+        store.record_message(conn, message, message_id, now)
+        if settings.delivery_hours:
+            notified.add(destination)
+        sends += 1
+        _log("send", settings, lens=",".join(dict.fromkeys(line.lens for line in message.lines)),
+             chat=message.chat_id, lines=len(message.lines), message_id=message_id)
+    return sends, failures
 
 
 def compact_messages(conn, settings, *, opener, now):
